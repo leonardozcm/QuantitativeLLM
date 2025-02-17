@@ -1,0 +1,2 @@
+#define CACHELINE_SIZE 64
+#define L1CACHE_SIZE 896*1024
