@@ -44,6 +44,7 @@ public:
     Tensor operator-(const Tensor& tensor) const;
     Tensor operator*(const Tensor& tensor) const;
     Tensor operator/(const Tensor& tensor) const;
+    void cpu_data(T* data_ptr) const;
     void save_to_file(const std::string& filename) const;
     static Tensor* load_from_file(const std::string& filename);
 
@@ -114,6 +115,12 @@ Tensor<T>::~Tensor() {
 template<typename T>
 T* Tensor<T>::data_ptr() {
     return data_;
+}
+
+
+template<typename T>
+void Tensor<T>::cpu_data(T* data_ptr) const {
+    cudaMemcpy(data_ptr, data_, size_ * sizeof(T), cudaMemcpyDeviceToHost);
 }
 
 template<typename T>

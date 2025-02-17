@@ -5,21 +5,16 @@
 #include "qttbench/qtt_state.h"
 #include "qttbench/qtt_tensor.cuh"
 
-__global__ void verify_gpu(const float *c, const float *a, int seq_len, int *ret, const int HD=128)
+__global__ void verify_gpu(const float *c, const float *a, int *ret)
 {
     if (!(*ret))
         return;
-    int hd_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int seq_idx = blockDim.y * blockIdx.y + threadIdx.y;
-    int head_idx = blockDim.z * blockIdx.z + threadIdx.z;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int idx = head_idx * seq_len * HD + HD * seq_idx + hd_idx;
-    // printf("%f, %f\n", c[idx], a[idx]);
-    // race but matters not
     if ((*ret) &&
         // This is not a good sanity check method, but in this experiment this is good enough.
         // refactor it with reduce sum mean diff
-        fabs(a[idx]) > 0.001 && fabs((c[idx] - a[idx]) / a[idx]) > 0.02)
+        fabs(c[idx] - a[idx]) > 1e-3)
     {
         printf("%f %f\n", c[idx], a[idx]);
         (*ret) = 0;
@@ -27,94 +22,82 @@ __global__ void verify_gpu(const float *c, const float *a, int seq_len, int *ret
 }
 
 template <typename T>
-__global__ void reset_gpu(T *m_t, const int seq_len, const int HD=128)
+__global__ void reset_gpu(T *m_t)
 {
-    int hd_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int seq_idx = blockDim.y * blockIdx.y + threadIdx.y;
-    int head_idx = blockDim.z * blockIdx.z + threadIdx.z;
-
-    int idx = head_idx * seq_len * HD + HD * seq_idx + hd_idx;
-    m_t[idx] = 0.f;
+    m_t[blockIdx.x * blockDim.x + threadIdx.x] = 0.f;
 }
 
-#define VERIFY_FUNC                                                                                                        \
-    [&](cudaStream_t s)                                                                                                    \
-    {                                                                                                                      \
-        constexpr int block_width = 16;                                                                                    \
-        constexpr int block_height = 16;                                                                                   \
-        const size_t head_dim = output.ne[0];                                                                                 \
-        const size_t seq_len = output.ne[2];                                                                                  \
-        const size_t num_heads = output.ne[1];                                                                                \
-        const size_t bs = output.ne[3];                                                                                       \
-        dim3 grid_size(head_dim / block_width, seq_len / block_height, bs * num_heads);                                    \
-        dim3 block_size(block_width, block_height, 1);                                                                     \
-        int *d_correct;                                                                                                    \
-        int correct = 1;                                                                                                   \
-        cudaMalloc(&d_correct, sizeof(int));                                                                               \
-        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                                              \
-        verify_gpu<<<grid_size, block_size, 0, s>>>(output.data_ptr(), baseline.data_ptr(), seq_len, d_correct); \
-        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                                              \
-        reset_gpu<T><<<grid_size, block_size, 0, s>>>(output.data_ptr(), seq_len);                               \
-        return correct;                                                                                                    \
+#define VERIFY_FUNC                                                                                     \
+    [&](cudaStream_t s)                                                                                 \
+    {                                                                                                   \
+        dim3 grid_size(num_heads/16);                                                                    \
+        dim3 block_size(16);                                                                      \
+        int *d_correct;                                                                                 \
+        int correct = 1;                                                                                \
+        cudaMalloc(&d_correct, sizeof(int));                                                            \
+        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                           \
+        verify_gpu<<<grid_size, block_size, 0, s>>>(output.data_ptr(), baseline.data_ptr(), d_correct); \
+        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                           \
+        reset_gpu<T><<<grid_size, block_size, 0, s>>>(output.data_ptr());                               \
+        return correct;                                                                                 \
     }
 
-
-template <typename T>
-__global__ void reduce_native(const T *input, T *output, const size_t s1, const size_t s2)
+template <typename T, int HD>
+__global__ void reduce_native(const T *input, T *output)
 {
-    int hd_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int seq_idx = blockDim.y * blockIdx.y + threadIdx.y;
-    int head_idx = blockDim.z * blockIdx.z + threadIdx.z;
-    int HD = s1;
+    __shared__ float sums[HD];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    sums[tid] = input[idx];
+    __syncthreads();
 
-    // assert bs == 1
-    int idx = head_idx * s1 + s2 * seq_idx + hd_idx;
+    for (int i = HD / 2; i > 0; i >>= 1)
+    {
+        if (tid < i)
+            sums[tid] += sums[i + tid];
+        __syncthreads();
+    }
 
-    if (hd_idx < (HD >> 1))
-    {
-        output[idx] = input[idx] * f_cos(seq_idx, hd_idx) - input[idx + (HD >> 1)] * f_sin(seq_idx, hd_idx);
-    }
-    else
-    {
-        output[idx] = input[idx] * f_cos(seq_idx, hd_idx) + input[idx - (HD >> 1)] * f_sin(seq_idx, hd_idx);
-    }
+    if (tid == 0)
+        output[blockIdx.x] = sums[0];
 }
-
 
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
-    constexpr int N = 32 * 1024 * 1024;
-    constexpr int BLK_SIZE = 256;
-    
+    constexpr int head_dim = 256;
+    constexpr int num_heads = 32 * 1024;
 
-    std::vector<int> ne = {N};
+    // std::vector<int> ne = {head_dim, num_heads};
 
-    qttbench::Tensor<qttbench::float32_t> input(1, ne);
+    qttbench::Tensor<qttbench::float32_t> input(2, {head_dim, num_heads});
     input.initialize_random();
 
-    qttbench::Tensor<qttbench::float32_t> output(4, ne);
+    qttbench::Tensor<qttbench::float32_t> output(1, {num_heads});
 
-    int32_t *pos_cpu = (int32_t *)malloc(seq_len * sizeof(int32_t));
-    for (int i = 0; i < seq_len; i++)
-    {
-        pos_cpu[i] = i;
+    T sums[num_heads] = {0};
+    T* i_data_cpu = (T*)malloc(sizeof(T)*head_dim*num_heads);
+    input.cpu_data(i_data_cpu);
+    for (int i = 0; i < num_heads; i++)
+    {   
+        for (int j = 0; j < head_dim; j++)
+        {
+            sums[i] += i_data_cpu[head_dim*i+j];
+        } 
     }
-    qttbench::Tensor<qttbench::int32_t> pos(1, {seq_len}, pos_cpu, true);
-    free(pos_cpu);
 
+    qttbench::Tensor<qttbench::float32_t> baseline(1, {num_heads}, sums);
 
     state.run(
-        "rope_native blocksize 16 * 16",
+        "reduce_native",
         [&](cudaStream_t s)
         {
-            dim3 grid_size(gx, gy, gw);
-            dim3 block_size(bx, by, bw);
-            op<T><<<grid_size, block_size, 0, s>>>(
-                static_cast<const T*>(input.data_ptr()), output.data_ptr(), s1, s2);
+            dim3 grid_size(num_heads);
+            dim3 block_size(head_dim);
+            reduce_native<T, head_dim><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), output.data_ptr());
         },
         VERIFY_FUNC);
-
 }
 
 int main(int argc, char *argv[])
