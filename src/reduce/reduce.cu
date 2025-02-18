@@ -43,7 +43,7 @@ __global__ void reset_gpu(T *m_t)
     }
 
 template <typename T, int HD>
-__global__ void reduce_native(const T *input, T *output)
+__global__ void reduce_v0_native(const T *input, T *output)
 {
     __shared__ float sums[HD];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -51,10 +51,51 @@ __global__ void reduce_native(const T *input, T *output)
     sums[tid] = input[idx];
     __syncthreads();
 
-    for (int i = HD / 2; i > 0; i >>= 1)
+    for(int s = 1; s<blockDim.x;s<<=1){
+        if(tid % (2*s) == 0){ // mod operation is expensive
+            sums[tid] += sums[tid+s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        output[blockIdx.x] = sums[0];
+}
+
+template <typename T, int HD>
+__global__ void reduce_v1_interleaved_addressing(const T *input, T *output)
+{
+    __shared__ float sums[HD];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    sums[tid] = input[idx];
+    __syncthreads();
+
+    for(int s = 1; s<blockDim.x; s<<=1){
+        int idx = 2 * s * tid;
+        if(idx<blockDim.x){
+            sums[idx] += sums[idx+s]; // share local memory bank conflict
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        output[blockIdx.x] = sums[0];
+}
+
+template <typename T, int HD>
+__global__ void reduce_v2_sequential_addressing(const T *input, T *output)
+{
+    __shared__ float sums[HD];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    sums[tid] = input[idx];
+    __syncthreads();
+
+    for (int s = HD / 2; s > 0; s >>= 1)
     {
-        if (tid < i)
-            sums[tid] += sums[i + tid];
+        if (tid < s)
+            sums[tid] += sums[s + tid];
         __syncthreads();
     }
 
@@ -66,7 +107,7 @@ template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
     constexpr int head_dim = 256;
-    constexpr int num_heads = 32 * 1024;
+    constexpr int num_heads = 1;
 
     // std::vector<int> ne = {head_dim, num_heads};
 
@@ -94,7 +135,29 @@ void test_with_dtype(qttbench::State &state)
         {
             dim3 grid_size(num_heads);
             dim3 block_size(head_dim);
-            reduce_native<T, head_dim><<<grid_size, block_size, 0, s>>>(
+            reduce_v0_native<T, head_dim><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), output.data_ptr());
+        },
+        VERIFY_FUNC);
+
+    state.run(
+        "reduce_v1_interleaved_addressing",
+        [&](cudaStream_t s)
+        {
+            dim3 grid_size(num_heads);
+            dim3 block_size(head_dim);
+            reduce_v1_interleaved_addressing<T, head_dim><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), output.data_ptr());
+        },
+        VERIFY_FUNC);
+
+    state.run(
+        "reduce_v2_sequential_addressing",
+        [&](cudaStream_t s)
+        {
+            dim3 grid_size(num_heads);
+            dim3 block_size(head_dim);
+            reduce_v2_sequential_addressing<T, head_dim><<<grid_size, block_size, 0, s>>>(
                 static_cast<const T *>(input.data_ptr()), output.data_ptr());
         },
         VERIFY_FUNC);
