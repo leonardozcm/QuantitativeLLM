@@ -149,13 +149,14 @@ __global__ void reduce_v3_first_add_during_load(const T *input, T *output, int h
         output[blockIdx.y*gridDim.x+blockIdx.x] = sums[0];
 }
 
+template <int blockSize>
 __device__ void warpReduce(volatile float* sdata, int tid){
-    sdata[tid] += sdata[tid + 32];
-    sdata[tid] += sdata[tid + 16];
-    sdata[tid] += sdata[tid + 8];
-    sdata[tid] += sdata[tid + 4];
-    sdata[tid] += sdata[tid + 2];
-    sdata[tid] += sdata[tid + 1];
+    if(blockSize >= 64) sdata[tid] += sdata[tid + 32];
+    if(blockSize >= 32) sdata[tid] += sdata[tid + 16];
+    if(blockSize >= 16) sdata[tid] += sdata[tid + 8];
+    if(blockSize >= 8) sdata[tid] += sdata[tid + 4];
+    if(blockSize >= 4) sdata[tid] += sdata[tid + 2];
+    if(blockSize >= 2) sdata[tid] += sdata[tid + 1];
 }
 
 template <typename T, int HD>
@@ -176,7 +177,31 @@ __global__ void reduce_v4_unroll_the_last_warp(const T *input, T *output, int he
         __syncthreads();
     }
 
-    if(tid<32)warpReduce(sums, tid);
+    if(tid<32)warpReduce<HD>(sums, tid); // or volatile float* sdata = sums;
+
+    if (tid == 0)
+        output[blockIdx.y*gridDim.x+blockIdx.x] = sums[0];
+}
+
+template <typename T, int HD>
+__global__ void reduce_v5_complete_unrolling(const T *input, T *output, int head_dim)
+{
+    __shared__ float sums[HD];
+    int idx = blockIdx.y*blockDim.y*head_dim 
+            + blockIdx.x * (blockDim.x <<1)
+            + threadIdx.x;
+    int tid = threadIdx.x;
+    sums[tid] = input[idx]+input[idx+blockDim.x];
+    __syncthreads();
+
+    if(HD>=256){
+        if (tid < 128){sums[tid] += sums[128 + tid];__syncthreads();}
+    }
+    if(HD>=128){
+        if (tid < 64){sums[tid] += sums[64 + tid];__syncthreads();}
+    }
+
+    if(tid<32)warpReduce<HD>(sums, tid); // or volatile float* sdata = sums;
 
     if (tid == 0)
         output[blockIdx.y*gridDim.x+blockIdx.x] = sums[0];
@@ -297,6 +322,26 @@ void test_with_dtype(qttbench::State &state)
             dim3 block_size_1(blk_size_1, 1);
             
             reduce_v4_unroll_the_last_warp<T, blk_size_1><<<grid_size_1, block_size_1, 0, s>>>(
+                static_cast<const T *>(internal.data_ptr()), output.data_ptr(), head_dim/BLK_SIZE/2);
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "reduce_v5_complete_unrolling",
+        [&](cudaStream_t s)
+        {
+            int N_BLK=(head_dim+BLK_SIZE-1)/BLK_SIZE/2;
+            dim3 grid_size(N_BLK, num_heads);
+            dim3 block_size(BLK_SIZE, 1);
+            // 256*256 -> 128
+            reduce_v5_complete_unrolling<T, BLK_SIZE><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), internal.data_ptr(), head_dim);
+            // 128 -> 1
+            constexpr int blk_size_1=BLK_SIZE/4;
+            dim3 grid_size_1((N_BLK+blk_size_1-1)/blk_size_1/2, num_heads);
+            dim3 block_size_1(blk_size_1, 1);
+            
+            reduce_v5_complete_unrolling<T, blk_size_1><<<grid_size_1, block_size_1, 0, s>>>(
                 static_cast<const T *>(internal.data_ptr()), output.data_ptr(), head_dim/BLK_SIZE/2);
         },
         VERIFY_FUNC);
