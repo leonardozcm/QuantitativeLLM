@@ -207,6 +207,48 @@ __global__ void reduce_v5_complete_unrolling(const T *input, T *output, int head
         output[blockIdx.y*gridDim.x+blockIdx.x] = sums[0];
 }
 
+template <int blockSize>
+__device__ float warpReduce_shuffle_down(volatile float* sdata, int tid){
+    float sum;
+    if(blockSize >= 64) sum =  sdata[tid] + sdata[tid + 32];
+    // following sdata are inside a warp, no need to use volatile
+    // release share memory access pressure
+    if(blockSize >= 32) sum += __shfl_down_sync(0xffffffff, sum, 16);
+    if(blockSize >= 16) sum += __shfl_down_sync(0xffffffff, sum, 8);
+    if(blockSize >= 8) sum += __shfl_down_sync(0xffffffff, sum, 4);
+    if(blockSize >= 4) sum += __shfl_down_sync(0xffffffff, sum, 2);
+    if(blockSize >= 2) sum += __shfl_down_sync(0xffffffff, sum, 1);
+    return sum;
+}
+
+
+template <typename T, int HD>
+__global__ void reduce_v6_warp_shuffle_down(const T *input, T *output, int head_dim)
+{
+    __shared__ float sums[HD];
+    int idx = blockIdx.y*blockDim.y*head_dim 
+            + blockIdx.x * (blockDim.x <<1)
+            + threadIdx.x;
+    int tid = threadIdx.x;
+    sums[tid] = input[idx]+input[idx+blockDim.x];
+    __syncthreads();
+
+    for (int s = blockDim.x >> 1; s > 32; s >>= 1)
+    {
+        if (tid < s)
+            sums[tid] += sums[s + tid];
+        __syncthreads();
+    }
+
+    float sum;
+    if(tid<32){
+        sum = warpReduce_shuffle_down<HD>(sums, tid); // or volatile float* sdata = sums;
+    }
+
+    if (tid == 0)
+        output[blockIdx.y*gridDim.x+blockIdx.x] = sum;
+}
+
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
@@ -342,6 +384,26 @@ void test_with_dtype(qttbench::State &state)
             dim3 block_size_1(blk_size_1, 1);
             
             reduce_v5_complete_unrolling<T, blk_size_1><<<grid_size_1, block_size_1, 0, s>>>(
+                static_cast<const T *>(internal.data_ptr()), output.data_ptr(), head_dim/BLK_SIZE/2);
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "reduce_v6_warp_shuffle_down",
+        [&](cudaStream_t s)
+        {
+            int N_BLK=(head_dim+BLK_SIZE-1)/BLK_SIZE/2;
+            dim3 grid_size(N_BLK, num_heads);
+            dim3 block_size(BLK_SIZE, 1);
+            // 256*256 -> 128
+            reduce_v6_warp_shuffle_down<T, BLK_SIZE><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), internal.data_ptr(), head_dim);
+            // 128 -> 1
+            constexpr int blk_size_1=BLK_SIZE/4;
+            dim3 grid_size_1((N_BLK+blk_size_1-1)/blk_size_1/2, num_heads);
+            dim3 block_size_1(blk_size_1, 1);
+            
+            reduce_v6_warp_shuffle_down<T, blk_size_1><<<grid_size_1, block_size_1, 0, s>>>(
                 static_cast<const T *>(internal.data_ptr()), output.data_ptr(), head_dim/BLK_SIZE/2);
         },
         VERIFY_FUNC);
