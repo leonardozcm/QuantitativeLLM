@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(OP_NAME name)
+set(OP_NAME softmax)
 project(${OP_NAME} LANGUAGES CUDA CXX)
 
 set(CMAKE_CXX_STANDARD 11)
@@ -10,4 +10,4 @@ include_directories((${PROJECT_SOURCE_DIR}/../../include))
 #GPU Benchmark
 add_executable(${OP_NAME} ${OP_NAME}.cu)
 target_compile_definitions(${OP_NAME} PUBLIC CUDA_EXECUTE)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -lineinfo")
