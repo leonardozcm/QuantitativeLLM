@@ -288,7 +288,7 @@ __global__ void softmax_native(const T *input, T *output, const int context_leng
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
-    constexpr int bs = 1, num_heads = 1, seq_len = 1, context_len = 1024;
+    constexpr int bs = 1, num_heads = 1, seq_len = 1024, context_len = 1024;
 
     std::vector<int> ne = {context_len, num_heads, seq_len, bs};
 
