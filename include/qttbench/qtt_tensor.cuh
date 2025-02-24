@@ -40,6 +40,7 @@ public:
     void initialize_random();
     T* data_ptr();
     T element_wise_difference(const Tensor& tensor) const;
+    size_t n_elements();
     Tensor operator+(const Tensor& tensor) const;
     Tensor operator-(const Tensor& tensor) const;
     Tensor operator*(const Tensor& tensor) const;
@@ -148,6 +149,11 @@ void Tensor<T>::initialize_random() {
     } else {
         initialize_random_gpu();
     }
+}
+
+template<typename T>
+size_t Tensor<T>::n_elements() {
+    return size_;
 }
 
 template<typename T>
