@@ -14,10 +14,10 @@ __global__ void verify_gpu(const float *output, const float *baseline, int *ret)
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
     if ((*ret) &&
-    // This is not a good sanity check method, but in this experiment this is good enough.
-    // refactor it with reduce sum mean diff
-    fabs(baseline[idx]) > 0.001 && 
-    fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
+        // This is not a good sanity check method, but in this experiment this is good enough.
+        // refactor it with reduce sum mean diff
+        fabs(baseline[idx]) > 0.001 &&
+        fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
     {
         printf("%f %f\n", output[idx], baseline[idx]);
         (*ret) = 0;
@@ -31,21 +31,21 @@ __global__ void reset_gpu(T *m_t, const int HD = 128)
     m_t[idx] = 0.f;
 }
 
-#define VERIFY_FUNC                                                                                              \
-    [&](cudaStream_t s)                                                                                          \
-    {                                                                                                            \
-        constexpr int block_width = 256;                                                                          \
-        const size_t n_elements = baseline.n_elements(); \
-        dim3 grid_size(n_elements / block_width,1,1);                          \
-        dim3 block_size(block_width, 1, 1);                                                           \
-        int *d_correct;                                                                                          \
-        int correct = 1;                                                                                         \
-        cudaMalloc(&d_correct, sizeof(int));                                                                     \
-        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                                    \
+#define VERIFY_FUNC                                                                                     \
+    [&](cudaStream_t s)                                                                                 \
+    {                                                                                                   \
+        constexpr int block_width = 256;                                                                \
+        const size_t n_elements = baseline.n_elements();                                                \
+        dim3 grid_size(n_elements / block_width, 1, 1);                                                 \
+        dim3 block_size(block_width, 1, 1);                                                             \
+        int *d_correct;                                                                                 \
+        int correct = 1;                                                                                \
+        cudaMalloc(&d_correct, sizeof(int));                                                            \
+        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                           \
         verify_gpu<<<grid_size, block_size, 0, s>>>(output.data_ptr(), baseline.data_ptr(), d_correct); \
-        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                                    \
+        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                           \
         reset_gpu<T><<<grid_size, block_size, 0, s>>>(output.data_ptr());                               \
-        return correct;                                                                                          \
+        return correct;                                                                                 \
     }
 
 // Input Tensor: [bs, n_heads, seq_length, context_length]
@@ -56,39 +56,44 @@ __global__ void reset_gpu(T *m_t, const int HD = 128)
 
 #define WARP_SIZE 32
 
-template<int width = WARP_SIZE>
-static __device__ __forceinline__ float warp_reduce_max(float x) {
+template <int width = WARP_SIZE>
+static __device__ __forceinline__ float warp_reduce_max(float x)
+{
 #pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
+    for (int offset = width / 2; offset > 0; offset >>= 1)
+    {
         x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
     }
     return x;
 }
 
-static __device__ __forceinline__ float warp_reduce_sum(float x) {
-    #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            x += __shfl_xor_sync(0xffffffff, x, offset, 32);
-        }
-        return x;
+static __device__ __forceinline__ float warp_reduce_sum(float x)
+{
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+    {
+        x += __shfl_xor_sync(0xffffffff, x, offset, 32);
     }
+    return x;
+}
 
 template <bool use_shared, int ncols_template, int block_size_template>
 static __global__ void soft_max_f32(
-        const float * x, float * dst,
-        const int ncols_par, // context_length
-        const int nrows_y, // rows
-        const float scale, // 1.0f by default
-        uint32_t n_head_log2) {
+    const float *x, float *dst,
+    const int ncols_par, // context_length
+    const int nrows_y,   // rows
+    const float scale,   // 1.0f by default
+    uint32_t n_head_log2)
+{
     const int ncols = ncols_template == 0 ? ncols_par : ncols_template;
 
-    const int tid  = threadIdx.x;
+    const int tid = threadIdx.x;
     const int rowx = blockIdx.x;
     // const int rowy = rowx % nrows_y; // broadcast the mask in the row dimension
 
-    x    += int64_t(rowx)*ncols;
+    x += int64_t(rowx) * ncols;
     // mask += int64_t(rowy)*ncols * (mask != nullptr);
-    dst  += int64_t(rowx)*ncols;
+    dst += int64_t(rowx) * ncols;
 
     const int block_size = block_size_template == 0 ? blockDim.x : block_size_template;
 
@@ -99,22 +104,24 @@ static __global__ void soft_max_f32(
     // const float slope = get_alibi_slope(max_bias, rowx/nrows_y, n_head_log2, m0, m1);
 
     extern __shared__ float data_soft_max_f32[];
-    float * buf_iw = data_soft_max_f32; // shared memory buffer for inter-warp communication
+    float *buf_iw = data_soft_max_f32; // shared memory buffer for inter-warp communication
     // shared memory buffer to cache values between iterations:
-    float * vals = use_shared ? buf_iw + WARP_SIZE : dst;
+    float *vals = use_shared ? buf_iw + WARP_SIZE : dst;
 
     float max_val = -INFINITY;
 
 #pragma unroll
-    for (int col0 = 0; col0 < ncols; col0 += block_size) {
+    for (int col0 = 0; col0 < ncols; col0 += block_size)
+    {
         const int col = col0 + tid;
 
-        if (ncols_template == 0 && col >= ncols) {
+        if (ncols_template == 0 && col >= ncols)
+        {
             break;
         }
 
         // const float val = x[col]*scale + (mask ? slope*t2f32(mask[col]) : 0.0f);
-        const float val = x[col]*scale;
+        const float val = x[col] * scale;
 
         vals[col] = val;
         max_val = max(max_val, val);
@@ -122,13 +129,16 @@ static __global__ void soft_max_f32(
 
     // find the max value in the block
     max_val = warp_reduce_max(max_val);
-    if (block_size > WARP_SIZE) {
-        if (warp_id == 0) {
+    if (block_size > WARP_SIZE)
+    {
+        if (warp_id == 0)
+        {
             buf_iw[lane_id] = -INFINITY;
         }
         __syncthreads();
 
-        if (lane_id == 0) {
+        if (lane_id == 0)
+        {
             buf_iw[warp_id] = max_val;
         }
         __syncthreads();
@@ -140,10 +150,12 @@ static __global__ void soft_max_f32(
     float tmp = 0.0f; // partial sum
 
 #pragma unroll
-    for (int col0 = 0; col0 < ncols; col0 += block_size) {
+    for (int col0 = 0; col0 < ncols; col0 += block_size)
+    {
         const int col = col0 + tid;
 
-        if (ncols_template == 0 && col >= ncols) {
+        if (ncols_template == 0 && col >= ncols)
+        {
             break;
         }
 
@@ -154,14 +166,17 @@ static __global__ void soft_max_f32(
 
     // find the sum of exps in the block
     tmp = warp_reduce_sum(tmp);
-    if (block_size > WARP_SIZE) {
+    if (block_size > WARP_SIZE)
+    {
         __syncthreads();
-        if (warp_id == 0) {
+        if (warp_id == 0)
+        {
             buf_iw[lane_id] = 0.0f;
         }
         __syncthreads();
 
-        if (lane_id == 0) {
+        if (lane_id == 0)
+        {
             buf_iw[warp_id] = tmp;
         }
         __syncthreads();
@@ -173,10 +188,12 @@ static __global__ void soft_max_f32(
     const float inv_sum = 1.0f / tmp;
 
 #pragma unroll
-    for (int col0 = 0; col0 < ncols; col0 += block_size) {
+    for (int col0 = 0; col0 < ncols; col0 += block_size)
+    {
         const int col = col0 + tid;
 
-        if (ncols_template == 0 && col >= ncols) {
+        if (ncols_template == 0 && col >= ncols)
+        {
             return;
         }
 
@@ -185,27 +202,43 @@ static __global__ void soft_max_f32(
 }
 
 template <int blockSize>
-__device__ void warpReduceMax(volatile float* sdata, int tid){
-    if(blockSize >= 64) sdata[tid] = max(sdata[tid], sdata[tid + 32]);
-    if(blockSize >= 32) sdata[tid] = max(sdata[tid], sdata[tid + 16]);
-    if(blockSize >= 16) sdata[tid] = max(sdata[tid], sdata[tid + 8]);
-    if(blockSize >= 8) sdata[tid] =  max(sdata[tid], sdata[tid + 4]);;
-    if(blockSize >= 4) sdata[tid] =  max(sdata[tid], sdata[tid + 2]);;
-    if(blockSize >= 2) sdata[tid] =  max(sdata[tid], sdata[tid + 1]);;
+__device__ void warpReduceMax(volatile float *sdata, int tid)
+{
+    if (blockSize >= 64)
+        sdata[tid] = max(sdata[tid], sdata[tid + 32]);
+    if (blockSize >= 32)
+        sdata[tid] = max(sdata[tid], sdata[tid + 16]);
+    if (blockSize >= 16)
+        sdata[tid] = max(sdata[tid], sdata[tid + 8]);
+    if (blockSize >= 8)
+        sdata[tid] = max(sdata[tid], sdata[tid + 4]);
+    ;
+    if (blockSize >= 4)
+        sdata[tid] = max(sdata[tid], sdata[tid + 2]);
+    ;
+    if (blockSize >= 2)
+        sdata[tid] = max(sdata[tid], sdata[tid + 1]);
+    ;
 }
 
 template <int blockSize>
-__device__ void warpReduceSum(volatile float* sdata, int tid){
-    if(blockSize >= 64) sdata[tid] += sdata[tid + 32];
-    if(blockSize >= 32) sdata[tid] += sdata[tid + 16];
-    if(blockSize >= 16) sdata[tid] += sdata[tid + 8];
-    if(blockSize >= 8) sdata[tid] += sdata[tid + 4];
-    if(blockSize >= 4) sdata[tid] += sdata[tid + 2];
-    if(blockSize >= 2) sdata[tid] += sdata[tid + 1];
+__device__ void warpReduceSum(volatile float *sdata, int tid)
+{
+    if (blockSize >= 64)
+        sdata[tid] += sdata[tid + 32];
+    if (blockSize >= 32)
+        sdata[tid] += sdata[tid + 16];
+    if (blockSize >= 16)
+        sdata[tid] += sdata[tid + 8];
+    if (blockSize >= 8)
+        sdata[tid] += sdata[tid + 4];
+    if (blockSize >= 4)
+        sdata[tid] += sdata[tid + 2];
+    if (blockSize >= 2)
+        sdata[tid] += sdata[tid + 1];
 }
 
-
-template <typename T, int BLOCK_SIZE=256> // == blk_size
+template <typename T, int BLOCK_SIZE = 256> // == blk_size
 __global__ void softmax_native(const T *input, T *output, const int context_length)
 {
     int seq_offset = blockIdx.x * context_length;
@@ -217,28 +250,33 @@ __global__ void softmax_native(const T *input, T *output, const int context_leng
 
     // Find the maximum value in the block
     float max_tid = -INFINITY;
-    for(int i=tid; i<context_length; i+=blockDim.x)
+    for (int i = tid; i < context_length; i += blockDim.x)
     {
         max_tid = max(input_ptr[i], max_tid);
     }
     maxreduce_data[tid] = max_tid;
     __syncthreads();
 
-    if(BLOCK_SIZE>=256){
-        if(tid<128){
-            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid+128]);
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 128]);
         }
         __syncthreads();
     }
 
-    if(BLOCK_SIZE>=128){
-        if(tid<64){
-            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid+64]);
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 64]);
         }
         __syncthreads();
-    } 
+    }
 
-    if(tid<32){
+    if (tid < 32)
+    {
         warpReduceMax<BLOCK_SIZE>(maxreduce_data, tid);
     }
     __syncthreads();
@@ -246,41 +284,172 @@ __global__ void softmax_native(const T *input, T *output, const int context_leng
     float max_val = maxreduce_data[0];
     float exp_sum = 0.f;
 
-    for(int i=tid; i<context_length; i+=blockDim.x)
+    for (int i = tid; i < context_length; i += blockDim.x)
     {
         float val = expf(input_ptr[i] - max_val);
         output_ptr[i] = val;
         exp_sum += val;
     }
-    maxreduce_data[tid]=exp_sum;
+    maxreduce_data[tid] = exp_sum;
     __syncthreads();
 
-    if(BLOCK_SIZE>=256){
-        if(tid<128){
-            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid+128];
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 128];
         }
         __syncthreads();
     }
 
-    if(BLOCK_SIZE>=128){
-        if(tid<64){
-            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid+64];
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 64];
         }
         __syncthreads();
-    } 
-    
-    if(tid<32){
+    }
+
+    if (tid < 32)
+    {
         warpReduceSum<BLOCK_SIZE>(maxreduce_data, tid);
     }
     __syncthreads();
 
     exp_sum = maxreduce_data[0];
 
-    for(int i=tid; i<context_length; i+=blockDim.x)
+    for (int i = tid; i < context_length; i += blockDim.x)
     {
-        output_ptr[i] /= exp_sum;
+        output_ptr[i] /= exp_sum; // most of them are cached in L2
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256> // == blk_size
+__global__ void softmax_dump_in_slm(const T *input, T *output, const int context_length)
+{
+    int seq_offset = blockIdx.x * context_length;
+    float *input_ptr = (float *)input + seq_offset;
+    float *output_ptr = (float *)output + seq_offset;
+
+    int tid = threadIdx.x;
+    extern __shared__ float maxreduce_data[];
+    float *output_templates = maxreduce_data + BLOCK_SIZE;
+
+    // Find the maximum value in the block
+    float max_tid = -INFINITY;
+    for (int i = tid; i < context_length; i += blockDim.x)
+    {
+        max_tid = max(input_ptr[i], max_tid);
+    }
+    maxreduce_data[tid] = max_tid;
+    __syncthreads();
+
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 128]);
+        }
+        __syncthreads();
     }
 
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 64]);
+        }
+        __syncthreads();
+    }
+
+    if (tid < 32)
+    {
+        warpReduceMax<BLOCK_SIZE>(maxreduce_data, tid);
+    }
+    __syncthreads();
+
+    float max_val = maxreduce_data[0];
+    float exp_sum = 0.f;
+
+    for (int i = tid; i < context_length; i += blockDim.x)
+    {
+        float val = expf(input_ptr[i] - max_val);
+        output_templates[i] = val;
+        exp_sum += val;
+    }
+    maxreduce_data[tid] = exp_sum;
+    __syncthreads();
+
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 128];
+        }
+        __syncthreads();
+    }
+
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 64];
+        }
+        __syncthreads();
+    }
+
+    if (tid < 32)
+    {
+        warpReduceSum<BLOCK_SIZE>(maxreduce_data, tid);
+    }
+    __syncthreads();
+
+    exp_sum = maxreduce_data[0];
+
+    for (int i = tid; i < context_length; i += blockDim.x)
+    {
+        output_ptr[i] = output_templates[i] / exp_sum;
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256> // == blk_size
+__global__ void softmax_warp_per_line(const T *input, T *output, const int context_length)
+{
+    int blk_line_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    int line_offset = blockIdx.x * (BLOCK_SIZE / WARP_SIZE) + blk_line_id;
+
+    float *warp_input_ptr = (float *)input + line_offset * context_length;
+    float *warp_output_ptr = (float *)output + line_offset * context_length;
+
+    float max_val = -INFINITY;
+    float input_buffer[(BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE]; // use register file to store the input this lane took. May cause overflow of local varibles.
+    int idx_buffer = 0;
+    for (int i = lane_id; i < context_length; i += WARP_SIZE)
+    {
+        float wip = warp_input_ptr[i];
+        max_val = max(max_val, wip);
+        input_buffer[idx_buffer++] = wip;
+    }
+
+    max_val = warp_reduce_max(max_val);
+
+    float max_sum = 0;
+    idx_buffer = 0;
+    for (int i = lane_id; i < context_length; i += WARP_SIZE)
+    {
+        float e_v = expf(input_buffer[idx_buffer] - max_val); // suffer from reading from L2
+        input_buffer[idx_buffer++] = e_v;
+        max_sum += e_v;
+    }
+
+    max_sum = warp_reduce_sum(max_sum);
+    idx_buffer = 0;
+    for (int i = lane_id; i < context_length; i += WARP_SIZE)
+    {
+        warp_output_ptr[i] = input_buffer[idx_buffer++] / max_sum; // suffer from reading from L2
+    }
 }
 
 #define GGML_PAD(x, n) (((x) + (n) - 1) & ~((n) - 1))
@@ -288,7 +457,7 @@ __global__ void softmax_native(const T *input, T *output, const int context_leng
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
-    constexpr int bs = 1, num_heads = 1, seq_len = 1024, context_len = 1024;
+    constexpr int bs = 1, num_heads = 16, seq_len = 1024, context_len = 2048;
 
     std::vector<int> ne = {context_len, num_heads, seq_len, bs};
 
@@ -302,16 +471,17 @@ void test_with_dtype(qttbench::State &state)
         "softmax_ggml",
         [&](cudaStream_t s)
         {
-            int nth=WARP_SIZE;
-            const int CUDA_SOFT_MAX_BLOCK_SIZE=512;
+            int nth = WARP_SIZE;
+            const int CUDA_SOFT_MAX_BLOCK_SIZE = 512;
             const int ncols_x = context_len;
-            const int nrows_x = num_heads*seq_len;
+            const int nrows_x = num_heads * seq_len;
             const int nrows_y = seq_len;
-            while (nth < ncols_x && nth < CUDA_SOFT_MAX_BLOCK_SIZE) nth *= 2;
-            const size_t shmem = (GGML_PAD(ncols_x, WARP_SIZE) + WARP_SIZE)*sizeof(float);
+            while (nth < ncols_x && nth < CUDA_SOFT_MAX_BLOCK_SIZE)
+                nth *= 2;
+            const size_t shmem = (GGML_PAD(ncols_x, WARP_SIZE) + WARP_SIZE) * sizeof(float);
 
-            const uint32_t n_head      = nrows_x/nrows_y;
-            const uint32_t n_head_log2 = 1u << (uint32_t) floorf(log2f((float) n_head));
+            const uint32_t n_head = nrows_x / nrows_y;
+            const uint32_t n_head_log2 = 1u << (uint32_t)floorf(log2f((float)n_head));
 
             dim3 block_nums(nrows_x, 1, 1);
             dim3 block_dims(nth, 1, 1);
@@ -330,9 +500,35 @@ void test_with_dtype(qttbench::State &state)
         [&](cudaStream_t s)
         {
             constexpr int block_width = 256;
-            dim3 grid_size(num_heads*seq_len);
+            dim3 grid_size(num_heads * seq_len);
             dim3 block_size(block_width);
             softmax_native<T, block_width><<<grid_size, block_size, 0, s>>>(
+                static_cast<const T *>(input.data_ptr()), output.data_ptr(), context_len);
+        },
+        VERIFY_FUNC);
+    // cost less when context_length < 1024 compare to ggml_softmax
+    state.run(
+        "softmax_dump_in_slm",
+        [&](cudaStream_t s)
+        {
+            constexpr int block_width = 256;
+            dim3 grid_size(num_heads * seq_len);
+            dim3 block_size(block_width);
+            const size_t shmem = (GGML_PAD(context_len, WARP_SIZE) + block_width) * sizeof(float);
+            softmax_dump_in_slm<T, block_width><<<grid_size, block_size, shmem, s>>>(
+                static_cast<const T *>(input.data_ptr()), output.data_ptr(), context_len);
+        },
+        VERIFY_FUNC);
+
+    //
+    state.run(
+        "softmax_warp_per_line",
+        [&](cudaStream_t s)
+        {
+            constexpr int block_width = 256;
+            dim3 grid_size(num_heads * seq_len / (block_width / WARP_SIZE));
+            dim3 block_size(block_width);
+            softmax_warp_per_line<T, block_width><<<grid_size, block_size, 0, s>>>(
                 static_cast<const T *>(input.data_ptr()), output.data_ptr(), context_len);
         },
         VERIFY_FUNC);
