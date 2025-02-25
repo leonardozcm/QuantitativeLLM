@@ -104,7 +104,7 @@ void test_with_dtype(qttbench::State &state)
 
 
     state.run(
-        "rope_native blocksize 16 * 16",
+        "op_native",
         [&](cudaStream_t s)
         {
             dim3 grid_size(gx, gy, gw);

@@ -18,7 +18,7 @@ __global__ void verify_gpu(const float *c, const float *a, int *ret)
         // refactor it with reduce sum mean diff
         (fabs(c[idx] - a[idx]) > ERR_ && fabs(c[idx] - a[idx]) / fabs(c[idx]) > ERR_))
     {
-        printf("%f %f\n", c[idx], a[idx]);
+        printf("%d:  %f %f\n", idx, c[idx], a[idx]);
         (*ret) = 0;
     }
 }
