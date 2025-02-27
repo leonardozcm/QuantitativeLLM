@@ -5,57 +5,49 @@
 #include "qttbench/qtt_state.h"
 #include "qttbench/qtt_tensor.cuh"
 
-__global__ void verify_gpu(const float *c, const float *a, int seq_len, int *ret, const int HD=128)
+__global__ void verify_gpu(const float *output, const float *baseline, int *ret)
 {
     if (!(*ret))
         return;
-    int hd_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int seq_idx = blockDim.y * blockIdx.y + threadIdx.y;
-    int head_idx = blockDim.z * blockIdx.z + threadIdx.z;
 
-    int idx = head_idx * seq_len * HD + HD * seq_idx + hd_idx;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
     if ((*ret) &&
         // This is not a good sanity check method, but in this experiment this is good enough.
         // refactor it with reduce sum mean diff
-        fabs(a[idx]) > 0.001 && fabs((c[idx] - a[idx]) / a[idx]) > 0.02)
+        fabs(baseline[idx]) > 0.001 &&
+        fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
     {
-        printf("%f %f\n", c[idx], a[idx]);
+        printf("%f %f\n", output[idx], baseline[idx]);
         (*ret) = 0;
     }
 }
 
 template <typename T>
-__global__ void reset_gpu(T *m_t, const int seq_len, const int HD=128)
+__global__ void reset_gpu(T *m_t, const int HD = 128)
 {
-    int hd_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int seq_idx = blockDim.y * blockIdx.y + threadIdx.y;
-    int head_idx = blockDim.z * blockIdx.z + threadIdx.z;
-
-    int idx = head_idx * seq_len * HD + HD * seq_idx + hd_idx;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
     m_t[idx] = 0.f;
 }
 
-#define VERIFY_FUNC                                                                                                        \
-    [&](cudaStream_t s)                                                                                                    \
-    {                                                                                                                      \
-        constexpr int block_width = 16;                                                                                    \
-        constexpr int block_height = 16;                                                                                   \
-        const size_t head_dim = output.ne[0];                                                                                 \
-        const size_t seq_len = output.ne[2];                                                                                  \
-        const size_t num_heads = output.ne[1];                                                                                \
-        const size_t bs = output.ne[3];                                                                                       \
-        dim3 grid_size(head_dim / block_width, seq_len / block_height, bs * num_heads);                                    \
-        dim3 block_size(block_width, block_height, 1);                                                                     \
-        int *d_correct;                                                                                                    \
-        int correct = 1;                                                                                                   \
-        cudaMalloc(&d_correct, sizeof(int));                                                                               \
-        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                                              \
-        verify_gpu<<<grid_size, block_size, 0, s>>>(output.data_ptr(), baseline.data_ptr(), seq_len, d_correct); \
-        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                                              \
-        reset_gpu<T><<<grid_size, block_size, 0, s>>>(output.data_ptr(), seq_len);                               \
-        return correct;                                                                                                    \
+
+
+#define VERIFY_FUNC                                                                                     \
+    [&](cudaStream_t s)                                                                                 \
+    {                                                                                                   \
+        constexpr int block_width = 256;                                                                \
+        const size_t n_elements = baseline.n_elements();                                                \
+        dim3 grid_size(n_elements / block_width, 1, 1);                                                 \
+        dim3 block_size(block_width, 1, 1);                                                             \
+        int *d_correct;                                                                                 \
+        int correct = 1;                                                                                \
+        cudaMalloc(&d_correct, sizeof(int));                                                            \
+        cudaMemcpy(d_correct, &correct, sizeof(int), cudaMemcpyHostToDevice);                           \
+        verify_gpu<<<grid_size, block_size, 0, s>>>(output.data_ptr(), baseline.data_ptr(), d_correct); \
+        cudaMemcpy(&correct, d_correct, sizeof(int), cudaMemcpyDeviceToHost);                           \
+        reset_gpu<T><<<grid_size, block_size, 0, s>>>(output.data_ptr());                               \
+        return correct;                                                                                 \
     }
 
 
