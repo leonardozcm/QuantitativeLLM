@@ -184,6 +184,103 @@ __global__ void rms_native(const T *input, T *output, const int length)
     }
 }
 
+template <typename T, int BLOCK_SIZE = 256, int PADDING_LENGTH=4096> // == blk_size
+__global__ void rms_unroll(const T *input, T *output)
+{
+    int seq_offset = blockIdx.x * PADDING_LENGTH;
+    float *input_ptr = (float *)input + seq_offset;
+    float *output_ptr = (float *)output + seq_offset;
+
+    int tid = threadIdx.x;
+    __shared__ float maxreduce_data[BLOCK_SIZE];
+
+    // Find the maximum value in the block
+    float max_tid = 0;
+    int idx=tid;
+    {
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+    }
+    {
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+    }
+    {
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+    }
+    {
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+        max_tid += input_ptr[idx] * input_ptr[idx];idx+=BLOCK_SIZE; 
+    }
+
+    maxreduce_data[tid] = max_tid;
+    __syncthreads();
+
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] += maxreduce_data[tid + 128];
+        }
+        __syncthreads();
+    }
+
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] += maxreduce_data[tid + 64];
+        }
+        __syncthreads();
+    }
+
+    if (tid < 32)
+    {
+        warpReduceSum<BLOCK_SIZE>(maxreduce_data, tid);
+    }
+    __syncthreads();
+
+    float pow_sum = maxreduce_data[0];
+    float rsqrt_rms_sum = rsqrtf(pow_sum/PADDING_LENGTH);// avoid divide instructions and rsqrt has faster inplementation, also this decrease the arithmetic intensity.
+    
+
+    idx=tid;
+    {
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+    }
+    {
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+    }
+    {
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+    }
+    {
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+        output_ptr[idx] = input_ptr[idx] * rsqrt_rms_sum;idx+=BLOCK_SIZE;
+    }
+
+}
+
 
 template <typename T>
 void test_with_dtype(qttbench::State &state)
@@ -223,6 +320,19 @@ void test_with_dtype(qttbench::State &state)
             static_cast<const T *>(input.data_ptr()), output.data_ptr(), head_embed);
     },
     VERIFY_FUNC);
+
+    state.run(
+    "rms_norm_unroll",
+    [&](cudaStream_t s)
+    {
+        constexpr int block_width = 256;
+        dim3 grid_size(seq_len);
+        dim3 block_size(block_width);
+        rms_unroll<T, block_width, head_embed><<<grid_size, block_size, 0, s>>>(
+            static_cast<const T *>(input.data_ptr()), output.data_ptr());
+    },
+    VERIFY_FUNC);
+
 }
 
 int main(int argc, char *argv[])

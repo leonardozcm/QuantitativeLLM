@@ -10,4 +10,4 @@ include_directories((${PROJECT_SOURCE_DIR}/../../include))
 #GPU Benchmark
 add_executable(${OP_NAME} ${OP_NAME}.cu)
 target_compile_definitions(${OP_NAME} PUBLIC CUDA_EXECUTE)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -g")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
