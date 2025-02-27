@@ -85,6 +85,53 @@ __device__ void warpReduceSum(volatile float *sdata, int tid)
         sdata[tid] += sdata[tid + 1];
 }
 
+
+#define WARP_SIZE 32
+
+static __device__ __forceinline__ float warp_reduce_sum(float x)
+{
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+    {
+        x += __shfl_xor_sync(0xffffffff, x, offset, 32);
+    }
+    return x;
+}
+
+template <int block_size>
+static __global__ void rms_norm_f32(const float * x, float * dst, const int ncols, const float eps) {
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
+    const int tid = threadIdx.x;
+
+    float tmp = 0.0f; // partial sum for thread in warp
+
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = x[row*ncols + col];
+        tmp += xi * xi;
+    }
+
+    // sum up partial sums
+    tmp = warp_reduce_sum(tmp);
+    if (block_size > WARP_SIZE) {
+        __shared__ float s_sum[32];
+        int warp_id = threadIdx.x / WARP_SIZE;
+        int lane_id = threadIdx.x % WARP_SIZE;
+        if (lane_id == 0) {
+            s_sum[warp_id] = tmp;
+        }
+        __syncthreads();
+        tmp = s_sum[lane_id];
+        tmp = warp_reduce_sum(tmp);
+    }
+
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+
+    for (int col = tid; col < ncols; col += block_size) {
+        dst[row*ncols + col] = scale * x[row*ncols + col];
+    }
+}
+
 template <typename T, int BLOCK_SIZE = 256> // == blk_size
 __global__ void rms_native(const T *input, T *output, const int length)
 {
@@ -99,7 +146,7 @@ __global__ void rms_native(const T *input, T *output, const int length)
     float max_tid = 0;
     for (int i = tid; i < length; i += blockDim.x)
     {
-        max_tid = max_tid;
+        max_tid += input_ptr[i] * input_ptr[i];
     }
     maxreduce_data[tid] = max_tid;
     __syncthreads();
@@ -108,7 +155,7 @@ __global__ void rms_native(const T *input, T *output, const int length)
     {
         if (tid < 128)
         {
-            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 128]);
+            maxreduce_data[tid] += maxreduce_data[tid + 128];
         }
         __syncthreads();
     }
@@ -117,43 +164,7 @@ __global__ void rms_native(const T *input, T *output, const int length)
     {
         if (tid < 64)
         {
-            maxreduce_data[tid] = max(maxreduce_data[tid], maxreduce_data[tid + 64]);
-        }
-        __syncthreads();
-    }
-
-    if (tid < 32)
-    {
-        warpReduceMax<BLOCK_SIZE>(maxreduce_data, tid);
-    }
-    __syncthreads();
-
-    float max_val = maxreduce_data[0];
-    float exp_sum = 0.f;
-
-    for (int i = tid; i < length; i += blockDim.x)
-    {
-        float val = expf(input_ptr[i] - max_val);
-        output_ptr[i] = val;
-        exp_sum += val;
-    }
-    maxreduce_data[tid] = exp_sum;
-    __syncthreads();
-
-    if (BLOCK_SIZE >= 256)
-    {
-        if (tid < 128)
-        {
-            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 128];
-        }
-        __syncthreads();
-    }
-
-    if (BLOCK_SIZE >= 128)
-    {
-        if (tid < 64)
-        {
-            maxreduce_data[tid] = maxreduce_data[tid] + maxreduce_data[tid + 64];
+            maxreduce_data[tid] += maxreduce_data[tid + 64];
         }
         __syncthreads();
     }
@@ -164,13 +175,15 @@ __global__ void rms_native(const T *input, T *output, const int length)
     }
     __syncthreads();
 
-    exp_sum = maxreduce_data[0];
+    float pow_sum = maxreduce_data[0];
+    float rms_sum = sqrtf(pow_sum/length);
 
     for (int i = tid; i < length; i += blockDim.x)
     {
-        output_ptr[i] /= exp_sum; // most of them are cached in L2
+        output_ptr[i] = input_ptr[i] / rms_sum; // most of them are cached in L2
     }
 }
+
 
 template <typename T>
 void test_with_dtype(qttbench::State &state)
@@ -186,16 +199,30 @@ void test_with_dtype(qttbench::State &state)
     qttbench::Tensor<qttbench::float32_t> output(3, ne);
 
     state.run(
-        "rms_norm_native",
-        [&](cudaStream_t s)
-        {
-            constexpr int block_width = 256;
-            dim3 grid_size(seq_len);
-            dim3 block_size(block_width);
-            rms_native<T, block_width><<<grid_size, block_size, 0, s>>>(
-                static_cast<const T *>(input.data_ptr()), output.data_ptr(), context_len);
-        },
-        VERIFY_FUNC);
+    "ggml rms_norm_f32",
+    [&](cudaStream_t s)
+    {
+        constexpr int block_width = 256;
+        dim3 grid_size(seq_len);
+        dim3 block_size(block_width);
+        rms_norm_f32<block_width><<<grid_size, block_size, 0, s>>>(
+            static_cast<const T *>(input.data_ptr()), baseline.data_ptr(), head_embed, 0.f);
+    },
+    [&](cudaStream_t s){
+        return true;
+    });
+
+    state.run(
+    "rms_norm_native",
+    [&](cudaStream_t s)
+    {
+        constexpr int block_width = 256;
+        dim3 grid_size(seq_len);
+        dim3 block_size(block_width);
+        rms_native<T, block_width><<<grid_size, block_size, 0, s>>>(
+            static_cast<const T *>(input.data_ptr()), output.data_ptr(), head_embed);
+    },
+    VERIFY_FUNC);
 }
 
 int main(int argc, char *argv[])
