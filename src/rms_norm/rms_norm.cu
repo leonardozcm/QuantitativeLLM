@@ -14,10 +14,10 @@ __global__ void verify_gpu(const float *output, const float *baseline, int *ret)
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
     if ((*ret) &&
-        // This is not a good sanity check method, but in this experiment this is good enough.
-        // refactor it with reduce sum mean diff
-        fabs(baseline[idx]) > 0.001 &&
-        fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
+    // This is not a good sanity check method, but in this experiment this is good enough.
+    // refactor it with reduce sum mean diff
+    fabs(baseline[idx]) > 0.001 &&
+    fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
     {
         printf("%f %f\n", output[idx], baseline[idx]);
         (*ret) = 0;
@@ -282,6 +282,126 @@ __global__ void rms_unroll(const T *input, T *output)
 }
 
 
+template <typename T, int BLOCK_SIZE = 256, int PADDING_LENGTH=4096> // == blk_size
+__global__ void rms_unroll_vector4(const T *input, T *output)
+{
+    int seq_offset = blockIdx.x * PADDING_LENGTH;
+    float *input_ptr = (float *)input + seq_offset;
+    float *output_ptr = (float *)output + seq_offset;
+
+    int tid = threadIdx.x;
+    __shared__ float maxreduce_data[BLOCK_SIZE];
+
+    // Find the maximum value in the block
+    float max_tid = 0;
+    int offset = tid*4;
+    // Note that the LG Throttle is slightly(really slight) high in ncu
+    // so we use vector memory access to release this throttle
+    // but this will increase the risk of other instructions
+    // and result in more LG Throttles
+    {
+        float4 vec_4 = *((float4*)(input_ptr+offset));
+        max_tid +=vec_4.x * vec_4.x;
+        max_tid +=vec_4.y * vec_4.y;
+        max_tid +=vec_4.w * vec_4.w;
+        max_tid +=vec_4.z * vec_4.z;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4 vec_4 = *((float4*)(input_ptr+offset));
+        max_tid +=vec_4.x * vec_4.x;
+        max_tid +=vec_4.y * vec_4.y;
+        max_tid +=vec_4.w * vec_4.w;
+        max_tid +=vec_4.z * vec_4.z;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4 vec_4 = *((float4*)(input_ptr+offset));
+        max_tid +=vec_4.x * vec_4.x;
+        max_tid +=vec_4.y * vec_4.y;
+        max_tid +=vec_4.w * vec_4.w;
+        max_tid +=vec_4.z * vec_4.z;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4 vec_4 = *((float4*)(input_ptr+offset));
+        max_tid +=vec_4.x * vec_4.x;
+        max_tid +=vec_4.y * vec_4.y;
+        max_tid +=vec_4.w * vec_4.w;
+        max_tid +=vec_4.z * vec_4.z;
+    }
+
+    maxreduce_data[tid] = max_tid;
+    __syncthreads();
+
+    if (BLOCK_SIZE >= 256)
+    {
+        if (tid < 128)
+        {
+            maxreduce_data[tid] += maxreduce_data[tid + 128];
+        }
+        __syncthreads();
+    }
+
+    if (BLOCK_SIZE >= 128)
+    {
+        if (tid < 64)
+        {
+            maxreduce_data[tid] += maxreduce_data[tid + 64];
+        }
+        __syncthreads();
+    }
+
+    if (tid < 32)
+    {
+        warpReduceSum<BLOCK_SIZE>(maxreduce_data, tid);
+    }
+    __syncthreads();
+
+    float pow_sum = maxreduce_data[0];
+    float rsqrt_rms_sum = rsqrtf(pow_sum/PADDING_LENGTH);// avoid divide instructions and rsqrt has faster inplementation, also this decrease the arithmetic intensity.
+    
+
+    offset = tid*4;
+    {
+        float4* vec_4 = (float4*)(input_ptr+offset);
+        float4* output_vec_4 = (float4*)(output_ptr+offset);
+        output_vec_4->x=vec_4->x * rsqrt_rms_sum;
+        output_vec_4->y=vec_4->y * rsqrt_rms_sum;
+        output_vec_4->z=vec_4->z * rsqrt_rms_sum;
+        output_vec_4->w=vec_4->w * rsqrt_rms_sum;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4* vec_4 = (float4*)(input_ptr+offset);
+        float4* output_vec_4 = (float4*)(output_ptr+offset);
+        output_vec_4->x=vec_4->x * rsqrt_rms_sum;
+        output_vec_4->y=vec_4->y * rsqrt_rms_sum;
+        output_vec_4->z=vec_4->z * rsqrt_rms_sum;
+        output_vec_4->w=vec_4->w * rsqrt_rms_sum;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4* vec_4 = (float4*)(input_ptr+offset);
+        float4* output_vec_4 = (float4*)(output_ptr+offset);
+        output_vec_4->x=vec_4->x * rsqrt_rms_sum;
+        output_vec_4->y=vec_4->y * rsqrt_rms_sum;
+        output_vec_4->z=vec_4->z * rsqrt_rms_sum;
+        output_vec_4->w=vec_4->w * rsqrt_rms_sum;
+        offset+=4*BLOCK_SIZE;
+    }
+    {
+        float4* vec_4 = (float4*)(input_ptr+offset);
+        float4* output_vec_4 = (float4*)(output_ptr+offset);
+        output_vec_4->x=vec_4->x * rsqrt_rms_sum;
+        output_vec_4->y=vec_4->y * rsqrt_rms_sum;
+        output_vec_4->z=vec_4->z * rsqrt_rms_sum;
+        output_vec_4->w=vec_4->w * rsqrt_rms_sum;
+    }
+
+}
+
+
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
@@ -329,6 +449,18 @@ void test_with_dtype(qttbench::State &state)
         dim3 grid_size(seq_len);
         dim3 block_size(block_width);
         rms_unroll<T, block_width, head_embed><<<grid_size, block_size, 0, s>>>(
+            static_cast<const T *>(input.data_ptr()), output.data_ptr());
+    },
+    VERIFY_FUNC);
+
+    state.run(
+    "rms_unroll_vector4",
+    [&](cudaStream_t s)
+    {
+        constexpr int block_width = 256;
+        dim3 grid_size(seq_len);
+        dim3 block_size(block_width);
+        rms_unroll_vector4<T, block_width, head_embed><<<grid_size, block_size, 0, s>>>(
             static_cast<const T *>(input.data_ptr()), output.data_ptr());
     },
     VERIFY_FUNC);
