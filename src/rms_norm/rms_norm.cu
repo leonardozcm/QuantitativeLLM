@@ -297,8 +297,8 @@ __global__ void rms_unroll_vector4(const T *input, T *output)
     int offset = tid*4;
     // Note that the LG Throttle is slightly(really slight) high in ncu
     // so we use vector memory access to release this throttle
-    // but this will increase the risk of other instructions
-    // and result in more LG Throttles
+    // but this will make every time warp memory access transaction count 
+    // increase from 1 to 4, actually makes LG Throttle block heavier.
     {
         float4 vec_4 = *((float4*)(input_ptr+offset));
         max_tid +=vec_4.x * vec_4.x;
