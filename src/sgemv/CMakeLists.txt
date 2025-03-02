@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(OP_NAME op_name)
+set(OP_NAME sgemv)
 project(${OP_NAME} LANGUAGES C CUDA CXX)
 
 set(CMAKE_CXX_STANDARD 11)
@@ -24,7 +24,7 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
 
 # Libraries
 target_compile_definitions(${OP_NAME} PUBLIC CUDA_EXECUTE)
-# target_link_libraries(${OP_NAME}
-#     PUBLIC
-#         cublas
-# )
+target_link_libraries(${OP_NAME}
+    PUBLIC
+        cublas
+)
