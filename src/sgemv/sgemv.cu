@@ -17,7 +17,7 @@ __global__ void verify_gpu(const float *C, const float *baseline, int *ret)
     if ((*ret) &&
     // This is not a good sanity check method, but in this experiment this is good enough.
     // refactor it with reduce sum mean diff
-    fabs(baseline[idx]) > 0.001 &&
+    (fabs(baseline[idx]) > 0.001 || fabs(C[idx])>0.001) &&
     fabs((C[idx] - baseline[idx]) / fmax(baseline[idx], C[idx])) > 0.02)
     {
         printf("idx:[%d, %d] %f %f\n", idx/256, idx%256, C[idx], baseline[idx]);
@@ -49,13 +49,13 @@ __global__ void reset_gpu(T *m_t, const int HD = 128)
         return correct;                                                                                 \
     }
 
-template<int BLOCK_SIZE>
+template<int BLOCK_SIZE=256>
 __global__ void sgemv_native(const float *A, const float *B, float *C, const size_t K)
 {
     int tid = threadIdx.x;
-    int gid = blockIdx.x + blockIdx.y*blockDim.x + blockIdx.z*blockDim.x*gridDim.y;
+    int gid = blockIdx.x * BLOCK_SIZE;
     
-    const float* B_ptr = B + (gid*BLOCK_SIZE + tid)*K;
+    const float* B_ptr = B + (gid + tid)*K;
     float* C_ptr = C + gid;
 
     float res=0;
@@ -68,7 +68,7 @@ __global__ void sgemv_native(const float *A, const float *B, float *C, const siz
 template <typename T>
 void test_with_dtype(qttbench::State &state)
 {
-    constexpr int bs = 1, seq_len = 1, hidden_status_A=256, hidden_status_B=256;
+    constexpr int bs = 1, seq_len = 1, hidden_status_A=4096, hidden_status_B=4096;
 
     qttbench::Tensor<qttbench::float32_t> A(3, {hidden_status_A, seq_len, bs});
     qttbench::Tensor<qttbench::float32_t> B(3, {hidden_status_A, hidden_status_B, bs});
@@ -92,17 +92,30 @@ void test_with_dtype(qttbench::State &state)
             const float alpha = 1.0;
             const float beta = 0.0;
 
-            // cublasSgemv(cublasH, transa, 1, ne0_B, &alpha, A.data_ptr(), lda, B.data_ptr(), ne0_A, &beta, baseline.data_ptr(), 1);
-            cublasSgemm(
+            // cublasSgemm(
+            //     cublasH,
+            //     CUBLAS_OP_T,
+            //     CUBLAS_OP_N,
+            //     1, ne0_B,  ne0_A,
+            //     &alpha,
+            //     A.data_ptr(), ne0_A,
+            //     B.data_ptr(), ne0_A,
+            //     &beta,
+            //     baseline.data_ptr(), ne0_B
+            // );
+            
+            // B^T * vec(A) = C^T
+            // for C is a vector so transposed doesn't change the memory layout.
+            //
+            cublasSgemv(
                 cublasH,
                 CUBLAS_OP_T,
-                CUBLAS_OP_N,
-                1, ne0_B,  ne0_A,
+                ne0_B, ne0_A,
                 &alpha,
-                A.data_ptr(), ne0_A,
-                B.data_ptr(), ne0_A,
+                B.data_ptr(), ne0_B,
+                A.data_ptr(), 1,
                 &beta,
-                baseline.data_ptr(), ne0_B
+                baseline.data_ptr(), 1
             );
         },
         [&](cudaStream_t s)

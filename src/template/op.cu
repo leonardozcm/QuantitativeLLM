@@ -16,7 +16,7 @@ __global__ void verify_gpu(const float *output, const float *baseline, int *ret)
     if ((*ret) &&
         // This is not a good sanity check method, but in this experiment this is good enough.
         // refactor it with reduce sum mean diff
-        fabs(baseline[idx]) > 0.001 &&
+        (fabs(baseline[idx]) > 0.001 ||  fabs(output[idx]) > 0.001) &&
         fabs((output[idx] - baseline[idx]) / fmax(baseline[idx], output[idx])) > 0.02)
     {
         printf("%f %f\n", output[idx], baseline[idx]);
