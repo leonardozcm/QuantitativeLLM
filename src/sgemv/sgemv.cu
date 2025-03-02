@@ -65,10 +65,10 @@ __global__ void sgemv_native(const float *A, const float *B, float *C, const siz
     C_ptr[tid] = res;
 }
 
-template <typename T>
+template <typename T, int HA=4096, int HB=4096>
 void test_with_dtype(qttbench::State &state)
 {
-    constexpr int bs = 1, seq_len = 1, hidden_status_A=4096, hidden_status_B=4096;
+    constexpr int bs = 1, seq_len = 1, hidden_status_A=HA, hidden_status_B=HB;
 
     qttbench::Tensor<qttbench::float32_t> A(3, {hidden_status_A, seq_len, bs});
     qttbench::Tensor<qttbench::float32_t> B(3, {hidden_status_A, hidden_status_B, bs});
@@ -110,9 +110,9 @@ void test_with_dtype(qttbench::State &state)
             cublasSgemv(
                 cublasH,
                 CUBLAS_OP_T,
-                ne0_B, ne0_A,
+                ne0_A, ne0_B,
                 &alpha,
-                B.data_ptr(), ne0_B,
+                B.data_ptr(), ne0_A,
                 A.data_ptr(), 1,
                 &beta,
                 baseline.data_ptr(), 1
@@ -184,5 +184,7 @@ int main(int argc, char *argv[])
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
     test_with_dtype<qttbench::float32_t>(state);
+    // test_with_dtype<qttbench::float32_t, 14336>(state);
+    test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
     return 0;
 }
