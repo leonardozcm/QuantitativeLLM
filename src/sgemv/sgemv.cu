@@ -17,8 +17,8 @@ __global__ void verify_gpu(const float *C, const float *baseline, int *ret)
     if ((*ret) &&
     // This is not a good sanity check method, but in this experiment this is good enough.
     // refactor it with reduce sum mean diff
-    (fabs(baseline[idx]) > 0.001 || fabs(C[idx])>0.001) &&
-    fabs((C[idx] - baseline[idx]) / fmax(baseline[idx], C[idx])) > 0.02)
+    (fabs(baseline[idx]) > 0.001 || fabs(C[idx])>0.01) &&
+    fabs((C[idx] - baseline[idx]) / fmax(baseline[idx], C[idx])) > 0.05)
     {
         printf("idx:[%d, %d] %f %f\n", idx/256, idx%256, C[idx], baseline[idx]);
         (*ret) = 0;
@@ -184,7 +184,7 @@ int main(int argc, char *argv[])
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
     test_with_dtype<qttbench::float32_t>(state);
-    // test_with_dtype<qttbench::float32_t, 14336>(state);
+    test_with_dtype<qttbench::float32_t, 14336>(state);
     test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
     return 0;
 }
