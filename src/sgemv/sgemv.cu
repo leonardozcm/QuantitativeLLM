@@ -65,6 +65,51 @@ __global__ void sgemv_native(const float *A, const float *B, float *C, const siz
     C_ptr[tid] = res;
 }
 
+
+static __device__ __forceinline__ float warp_reduce_sum(float x)
+{
+#pragma unroll
+    for(int offset = 16; offset>0; offset>>=1)
+    {
+        x+= __shfl_xor_sync(0xffffffff,x,offset, 32);
+    }
+    return x;
+}
+
+#define WARP_SIZE 32
+// assert K mod blockDim.x == 0
+template<int N_BLOCK, int K>
+__global__ void sgemv_tiling_base(const float *A, const float *B, float *C)
+{
+    __shared__ float A_slm[K];
+    const int tx = blockDim.x;
+    const int tid = threadIdx.x;
+    
+    // load A to slm
+    #pragma unroll
+    for(int i=tid; i<K; i+=tx){
+        A_slm[i]=A[i];
+    }
+    __syncthreads();
+    
+    const int warp_idx = tid / WARP_SIZE;
+    const int lane_idx = tid % WARP_SIZE;
+    const int warps_num = tx / WARP_SIZE;
+
+    const float* B_blk_base_t = B + (blockIdx.x*N_BLOCK)*K;
+    
+    #pragma unroll
+    for(int i=warp_idx; i<N_BLOCK; i+=warps_num){
+        const float* B_warp_t = B_blk_base_t + i*K;
+        float sum = 0.f;
+        for(int j=lane_idx; j<K; j+=WARP_SIZE){
+            sum+=B_warp_t[j]*A_slm[j];
+        }
+        warp_reduce_sum(sum);
+        if(lane_idx==0)C[blockIdx.x*N_BLOCK+i]=sum;
+    }
+}
+
 template <typename T, int HA=4096, int HB=4096>
 void test_with_dtype(qttbench::State &state)
 {
@@ -140,6 +185,23 @@ void test_with_dtype(qttbench::State &state)
         },
         VERIFY_FUNC);
 
+    state.run(
+        "sgemv_tiling_base 64",
+        [&](cudaStream_t s)
+        {
+            constexpr size_t ne0_A = hidden_status_A;
+            const size_t ne0_B = hidden_status_B;
+            const size_t ne1 = seq_len;
+            const size_t ne2 = bs;
+            constexpr int BLOCK_SIZE = 64;
+
+            dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
+            dim3 block_size(BLOCK_SIZE, 1, 1);
+            sgemv_tiling_base<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
+                A.data_ptr(), B.data_ptr(), C.data_ptr());
+        },
+        VERIFY_FUNC);
+
 }
 
 int main(int argc, char *argv[])
@@ -184,7 +246,7 @@ int main(int argc, char *argv[])
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
     test_with_dtype<qttbench::float32_t>(state);
-    test_with_dtype<qttbench::float32_t, 14336>(state);
-    test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
+    // test_with_dtype<qttbench::float32_t, 14336>(state);
+    // test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
     return 0;
 }
