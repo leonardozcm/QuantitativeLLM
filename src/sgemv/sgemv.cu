@@ -14,6 +14,7 @@ __global__ void verify_gpu(const float *C, const float *baseline, int *ret)
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
+    // printf("idx:[%d, %d] %f %f\n", idx/256, idx%256, C[idx], baseline[idx]);
     if ((*ret) &&
     // This is not a good sanity check method, but in this experiment this is good enough.
     // refactor it with reduce sum mean diff
@@ -35,7 +36,7 @@ __global__ void reset_gpu(T *m_t, const int HD = 128)
 #define VERIFY_FUNC                                                                                     \
     [&](cudaStream_t s)                                                                                 \
     {                                                                                                   \
-        constexpr int block_width = 256;                                                                \
+        constexpr int block_width = 64;                                                                \
         const size_t n_elements = baseline.n_elements();                                                \
         dim3 grid_size(n_elements / block_width, 1, 1);                                                 \
         dim3 block_size(block_width, 1, 1);                                                             \
@@ -105,7 +106,32 @@ __global__ void sgemv_tiling_base(const float *A, const float *B, float *C)
         for(int j=lane_idx; j<K; j+=WARP_SIZE){
             sum+=B_warp_t[j]*A_slm[j];
         }
-        warp_reduce_sum(sum);
+        sum=warp_reduce_sum(sum);
+        if(lane_idx==0)C[blockIdx.x*N_BLOCK+i]=sum;
+    }
+}
+
+template<int N_BLOCK, int K>
+__global__ void sgemv_tiling_no_slm(const float *A, const float *B, float *C)
+{
+    // __shared__ float A_slm[K];
+    const int tx = blockDim.x;
+    const int tid = threadIdx.x;
+    
+    const int warp_idx = tid / WARP_SIZE;
+    const int lane_idx = tid % WARP_SIZE;
+    const int warps_num = tx / WARP_SIZE;
+
+    const float* B_blk_base_t = B + (blockIdx.x*N_BLOCK)*K;
+    
+    #pragma unroll
+    for(int i=warp_idx; i<N_BLOCK; i+=warps_num){
+        const float* B_warp_t = B_blk_base_t + i*K;
+        float sum = 0.f;
+        for(int j=lane_idx; j<K; j+=WARP_SIZE){
+            sum+=B_warp_t[j]*A[j];
+        }
+        sum=warp_reduce_sum(sum);
         if(lane_idx==0)C[blockIdx.x*N_BLOCK+i]=sum;
     }
 }
@@ -185,18 +211,55 @@ void test_with_dtype(qttbench::State &state)
         },
         VERIFY_FUNC);
 
-    state.run(
-        "sgemv_tiling_base 64",
+        state.run(
+        "sgemv_tiling_base 64 128",
         [&](cudaStream_t s)
         {
             constexpr size_t ne0_A = hidden_status_A;
             const size_t ne0_B = hidden_status_B;
             const size_t ne1 = seq_len;
             const size_t ne2 = bs;
-            constexpr int BLOCK_SIZE = 64;
+            constexpr int BLOCK_SIZE = 128;
+            constexpr int tx = 64;
 
             dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
-            dim3 block_size(BLOCK_SIZE, 1, 1);
+            dim3 block_size(tx, 1, 1);
+            sgemv_tiling_base<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
+                A.data_ptr(), B.data_ptr(), C.data_ptr());
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "sgemv_tiling_base 64 256",
+        [&](cudaStream_t s)
+        {
+            constexpr size_t ne0_A = hidden_status_A;
+            const size_t ne0_B = hidden_status_B;
+            const size_t ne1 = seq_len;
+            const size_t ne2 = bs;
+            constexpr int BLOCK_SIZE = 256;
+            constexpr int tx = 64;
+
+            dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
+            dim3 block_size(tx, 1, 1);
+            sgemv_tiling_base<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
+                A.data_ptr(), B.data_ptr(), C.data_ptr());
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "sgemv_tiling_base 128 256",
+        [&](cudaStream_t s)
+        {
+            constexpr size_t ne0_A = hidden_status_A;
+            const size_t ne0_B = hidden_status_B;
+            const size_t ne1 = seq_len;
+            const size_t ne2 = bs;
+            constexpr int BLOCK_SIZE = 256;
+            constexpr int tx = 128;
+
+            dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
+            dim3 block_size(tx, 1, 1);
             sgemv_tiling_base<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
                 A.data_ptr(), B.data_ptr(), C.data_ptr());
         },
@@ -245,6 +308,7 @@ int main(int argc, char *argv[])
     qttbench::State state(turns, perf, perf);
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
+    // test_with_dtype<qttbench::float32_t, 64, 64>(state);
     test_with_dtype<qttbench::float32_t>(state);
     // test_with_dtype<qttbench::float32_t, 14336>(state);
     // test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
