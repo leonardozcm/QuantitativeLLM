@@ -136,6 +136,42 @@ __global__ void sgemv_tiling_no_slm(const float *A, const float *B, float *C)
     }
 }
 
+// on case 4096 * 4096
+// GPU SMs can not be saturated by kernels above
+// if we only have 32 blocks to achieve this work
+// so in this kernel we have blocks with less work to do and more blocks cooperate at the same time
+template<int N_BLOCK, int K>
+__global__ void sgemv_saturate_sm(const float *A, const float *B, float *C)
+{
+    __shared__ float A_slm[N_BLOCK * WARP_SIZE];
+    const int warp_idx = threadIdx.y;
+    const int lane_idx = threadIdx.x;
+    const int blk_idx = blockIdx.x;
+    const int tid = warp_idx*WARP_SIZE+lane_idx;
+
+    const float* A_blk_base_t = A;
+    const float* B_blk_base_t = B + (blk_idx*N_BLOCK+warp_idx)*K;
+
+    float sum = 0.f;
+    #pragma unroll
+    for(int i=lane_idx; i<K; i+=WARP_SIZE*N_BLOCK){
+        // load A shard to slm
+        A_slm[tid] = A_blk_base_t[tid];
+        __syncthreads();
+        
+        #pragma unroll
+        for(int j=lane_idx; j<N_BLOCK*WARP_SIZE; j+=WARP_SIZE){
+            sum+=A_slm[j]*B_blk_base_t[j];
+        }
+        A_blk_base_t+=WARP_SIZE*N_BLOCK;
+        B_blk_base_t += WARP_SIZE*N_BLOCK;
+    }
+
+    sum=warp_reduce_sum(sum);
+    if(lane_idx==0)C[blk_idx*N_BLOCK+warp_idx]=sum;
+
+}
+
 template <typename T, int HA=4096, int HB=4096>
 void test_with_dtype(qttbench::State &state)
 {
@@ -261,6 +297,23 @@ void test_with_dtype(qttbench::State &state)
             dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
             dim3 block_size(tx, 1, 1);
             sgemv_tiling_base<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
+                A.data_ptr(), B.data_ptr(), C.data_ptr());
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "sgemv_saturate_sm BLOCK SIZE 4",
+        [&](cudaStream_t s)
+        {
+            constexpr size_t ne0_A = hidden_status_A;
+            const size_t ne0_B = hidden_status_B;
+            const size_t ne1 = seq_len;
+            const size_t ne2 = bs;
+            constexpr int BLOCK_SIZE = 4;
+
+            dim3 grid_size((ne0_B+BLOCK_SIZE-1)/BLOCK_SIZE, ne1, ne2);
+            dim3 block_size(WARP_SIZE, BLOCK_SIZE, 1);
+            sgemv_saturate_sm<BLOCK_SIZE, ne0_A><<<grid_size, block_size, 0, s>>>(
                 A.data_ptr(), B.data_ptr(), C.data_ptr());
         },
         VERIFY_FUNC);
