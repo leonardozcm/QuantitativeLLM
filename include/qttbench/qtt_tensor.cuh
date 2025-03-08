@@ -15,7 +15,8 @@ namespace qttbench {
 
 #define MAX_DIM 4
 
-__global__ void initRandomArray(float* arr, int width, int height, unsigned long seed) {
+template<typename T>
+__global__ void initRandomArray(T* arr, int width, int height, unsigned long seed) {
     int x = threadIdx.x + blockIdx.x * blockDim.x;
     int y = threadIdx.y + blockIdx.y * blockDim.y;
     int idx = y * width + x;
@@ -23,7 +24,7 @@ __global__ void initRandomArray(float* arr, int width, int height, unsigned long
     if (x < width && y < height) {
         curandState state;
         curand_init(seed, idx, 0, &state);
-        arr[idx] = curand_uniform(&state) * 20.0f - 10.0f; // Scale to [-10.0, 10.0]
+        arr[idx] = static_cast<T>(curand_uniform(&state) * 20.0f - 10.0f); // Scale to [-10.0, 10.0]
     }
 };
 
@@ -174,7 +175,7 @@ void Tensor<T>::initialize_random_gpu() {
     dim3 blocksPerGrid((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
                        (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
-    initRandomArray<<<blocksPerGrid, threadsPerBlock>>>(data_, width, height, time(NULL));
+    initRandomArray<T><<<blocksPerGrid, threadsPerBlock>>>(data_, width, height, time(NULL));
 }
 
 
