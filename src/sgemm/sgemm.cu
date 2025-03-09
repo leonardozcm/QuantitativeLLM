@@ -78,7 +78,9 @@ __global__ void sgemm_native(const float *A, const float *B, float *C, const siz
  * DRAM latency 471 cycles
  * L2 cache latency 214 cycles
  * L1 cache latency 32 cycles
- * smem latency 22 cycles
+ * smem latency 22 cycles 
+ * shared memory bandwidth per SM (measured): 111.734879 byte/cycle
+ * shared memory bandwidth per SM (theoretical): 128 byte/cycle
  * 
  * DRAM bandwidth
 ```
