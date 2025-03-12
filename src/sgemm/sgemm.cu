@@ -17,13 +17,15 @@ __global__ void verify_gpu(const float *C, const float *baseline, int *ret)
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
     // printf("idx:[%d, %d] %f %f\n", idx/256, idx%256, C[idx], baseline[idx]);
+    bool flag =         (fabs(baseline[idx]) > 0.001 || fabs(C[idx]) > 0.01) &&
+    fabs((C[idx] - baseline[idx]) / fmax(baseline[idx], C[idx])) > 0.05;
+    printf("idx:[%d, %d] %f %f %s\n", idx / 128, idx % 128, C[idx], baseline[idx], flag?"false":"true");
     if ((*ret) &&
         // This is not a good sanity check method, but in this experiment this is good enough.
         // refactor it with reduce sum mean diff
-        (fabs(baseline[idx]) > 0.001 || fabs(C[idx]) > 0.01) &&
-        fabs((C[idx] - baseline[idx]) / fmax(baseline[idx], C[idx])) > 0.05)
+        flag
+    )
     {
-        printf("idx:[%d, %d] %f %f\n", idx / 256, idx % 256, C[idx], baseline[idx]);
         (*ret) = 0;
     }
 }
@@ -160,46 +162,75 @@ __global__ void sgemm_tiling_base(const float *A, const float *B, float *C, cons
     // 0~2
     const int warp_C_offset_in_blk_column = warp_idx % warps_blk_y; // 0~2
     // 0
-    const int A_slm_warp_offset = warp_C_offset_in_blk_row * (M_BLOCK/warps_blk_x);// 0, 32, 64, 96
-    const int B_slm_warp_offset = warp_C_offset_in_blk_column * (N_BLOCK/warps_blk_y); // 0, 64
+    const int warps_blk_A_size = M_BLOCK/warps_blk_x; // 32
+    const int warps_blk_B_size = N_BLOCK/warps_blk_y; // 64
+    const int A_slm_warp_offset = warp_C_offset_in_blk_row * warps_blk_A_size;// 0, 32, 64, 96
+    const int B_slm_warp_offset = warp_C_offset_in_blk_column * warps_blk_B_size; // 0, 64
+
+    const int A_reg_ld_x_idx = ty%(warps_blk_A_size/M_THREAD)*M_THREAD;// 0, 8, 16, 24
+    const int B_reg_ld_y_idx = ty%(warps_blk_B_size/N_THREAD)*N_THREAD;// 0, 8, 16, 24...56 
 
     for(int k_cur=0; k_cur<K; k_cur+=K_BLOCK){
-        int t_ld_off_in_blk_y = thread_ld_offset_in_blk_y;
+        int t_ld_off_in_blk_y = thread_ld_offset_in_blk_y;// 0~128
 
         // load A B block to slm
         #pragma unroll
         for(int t_ld_time = 0; t_ld_time<thread_ld_times; t_ld_time++){
 
             // load A blk
-            FECTH_FLOAT4(&A_blk_tile[t_ld_off_in_blk_y][thread_ld_offset_in_blk_x<<2])=
-            FECTH_CONST_FLOAT4(A_blk_base_ptr+t_ld_off_in_blk_y*K+thread_ld_offset_in_blk_x<<2);// <<2 for we already know it is a float4
+            FECTH_FLOAT4(&A_blk_tile[t_ld_off_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
+            FECTH_CONST_FLOAT4(A_blk_base_ptr+t_ld_off_in_blk_y*K+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));// <<2 for we already know it is a float4
             
             // load B blk
-            FECTH_FLOAT4(&B_blk_tile[t_ld_off_in_blk_y][thread_ld_offset_in_blk_x<<2])=
-            FECTH_CONST_FLOAT4(B_blk_base_ptr+t_ld_off_in_blk_y*K+thread_ld_offset_in_blk_x<<2);// <<2 for we already know it is a float4
+            FECTH_FLOAT4(&B_blk_tile[t_ld_off_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
+            FECTH_CONST_FLOAT4(B_blk_base_ptr+t_ld_off_in_blk_y*K+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));// <<2 for we already know it is a float4
 
             t_ld_off_in_blk_y+=warp_ld_cover_y_in_blk;
             
         }
         __syncthreads();
 
-        // each warp accumlate C_blk
+        // each warp accumlate C_thread_reg
         #pragma unroll
         for(int k_i=0; k_i<K_BLOCK; k_i++){
             // load slm to A_reg
-
+            #pragma unroll
+            for(int i=0; i<M_THREAD; i++){
+                A_thread_reg[i] = A_blk_tile[A_slm_warp_offset+A_reg_ld_x_idx+i][k_i];
+            }
+            
             // load slm to b_reg
+            #pragma unroll
+            for(int i=0; i<N_THREAD; i++){
+                B_thread_reg[i] = B_blk_tile[B_slm_warp_offset+B_reg_ld_y_idx+i][k_i];
+            }
 
             // perform external product on A_reg x B_reg, store to C_reg
+            #pragma unroll
+            for(int i=0; i<M_THREAD; i++){
+                #pragma unroll
+                for(int j=0; j<N_THREAD; j++){
+                    C_thread_reg[i][j] += A_thread_reg[i]*B_thread_reg[j];
+                }
+            }
 
         }
+        __syncthreads();
 
         A_blk_base_ptr+=K_BLOCK;
         B_blk_base_ptr+=K_BLOCK;
     }
 
     // write C_reg to DRAM
-
+    const int B_x_idx = blk_x*N_BLOCK+tx*N_THREAD;
+    const int A_y_idx = blk_y*M_BLOCK+ty*M_THREAD;
+    #pragma unroll
+    for(int i=0; i<M_THREAD; i++){
+        #pragma unroll
+        for(int j=0; j<N_THREAD; j++){
+            C[(A_y_idx+i)*K+B_x_idx+j] = C_thread_reg[i][j];
+        }
+    }
 
 }
 
@@ -259,19 +290,38 @@ void test_with_dtype(qttbench::State &state)
             return true;
         });
 
+    // state.run(
+    //     "sgemm_native",
+    //     [&](cudaStream_t s)
+    //     {
+    //         const size_t K = hidden_status_A;
+    //         const size_t N = hidden_status_B;
+    //         const size_t M = seq_len;
+    //         const size_t ne2 = bs;
+    //         constexpr int BLOCK_SIZE = 256;
+
+    //         dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, M, ne2);
+    //         dim3 block_size(BLOCK_SIZE, 1, 1);
+    //         sgemm_native<BLOCK_SIZE><<<grid_size, block_size, 0, s>>>(
+    //             A.data_ptr(), B.data_ptr(), C.data_ptr(), M, K, N);
+    //     },
+    //     VERIFY_FUNC);
+
     state.run(
-        "sgemm_native",
+        "sgemm_tiling 128 128 8 8 8",
         [&](cudaStream_t s)
         {
             const size_t K = hidden_status_A;
             const size_t N = hidden_status_B;
             const size_t M = seq_len;
             const size_t ne2 = bs;
-            constexpr int BLOCK_SIZE = 256;
+            constexpr int BLOCK_SIZE = 128;
+            constexpr int THREAD_SIZE = 8;
+            constexpr int K_BLOCK_SIZE = 8;
 
-            dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, M, ne2);
-            dim3 block_size(BLOCK_SIZE, 1, 1);
-            sgemm_native<BLOCK_SIZE><<<grid_size, block_size, 0, s>>>(
+            dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M+BLOCK_SIZE-1)/ BLOCK_SIZE, ne2);
+            dim3 block_size(BLOCK_SIZE/THREAD_SIZE, BLOCK_SIZE/THREAD_SIZE, 1);
+            sgemm_tiling_base<BLOCK_SIZE, BLOCK_SIZE, K_BLOCK_SIZE, THREAD_SIZE, THREAD_SIZE><<<grid_size, block_size, 0, s>>>(
                 A.data_ptr(), B.data_ptr(), C.data_ptr(), M, K, N);
         },
         VERIFY_FUNC);
@@ -319,7 +369,7 @@ int main(int argc, char *argv[])
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
     // test_with_dtype<qttbench::float32_t, 64, 64>(state);
-    test_with_dtype<qttbench::float32_t, 2, 4096, 4096>(state);
+    test_with_dtype<qttbench::float32_t, 128, 128, 128>(state);
     // test_with_dtype<qttbench::float32_t, 2, 4096, 14336>(state);
     // test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
     return 0;

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 
 #include "qtt_cuda_runtime.cuh"
 #include <curand_kernel.h>
@@ -175,7 +176,10 @@ void Tensor<T>::initialize_random_gpu() {
     dim3 blocksPerGrid((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
                        (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
-    initRandomArray<T><<<blocksPerGrid, threadsPerBlock>>>(data_, width, height, time(NULL));
+    auto now = std::chrono::high_resolution_clock::now();
+    auto duration = now.time_since_epoch();
+    unsigned long seed = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    initRandomArray<T><<<blocksPerGrid, threadsPerBlock>>>(data_, width, height, seed);
 }
 
 
@@ -383,7 +387,18 @@ void Tensor<T>::print(Args... args) const {
         }
         std::cout << std::endl;
     } else {
-        std::cerr << "GPU support needs to be implemented." << std::endl;
+        T* data_cpu = (T*)malloc(size_ * sizeof(T));
+        cudaMemcpy(data_cpu, data_, size_ * sizeof(T), cudaMemcpyDeviceToHost);
+        std::cout<<"Tensor dim2 print..."<<std::endl;
+        for(int i=0; i<ne[1]; i++) {
+            for(int j=0; j<ne[0]; j++){
+                std::cout<<data_cpu[i*ne[0]+j]<<" ";
+            }
+            std::cout<<std::endl;
+        }
+        std::cout<<"Tensor dim2 print done"<<std::endl;
+
+        // std::cerr << "GPU support needs to be implemented." << std::endl;
     }
 }
 
