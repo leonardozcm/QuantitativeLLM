@@ -391,6 +391,7 @@ void Tensor<T>::print(Args... args) const {
         cudaMemcpy(data_cpu, data_, size_ * sizeof(T), cudaMemcpyDeviceToHost);
         std::cout<<"Tensor dim2 print..."<<std::endl;
         for(int i=0; i<ne[1]; i++) {
+            std::cout<<"Row "<<i<<": ";
             for(int j=0; j<ne[0]; j++){
                 std::cout<<data_cpu[i*ne[0]+j]<<" ";
             }
