@@ -19,8 +19,8 @@ set(CMAKE_CUDA_EXTENSIONS OFF)
 #GPU Benchmark
 add_executable(${OP_NAME} ${OP_NAME}.cu)
 set_property(TARGET ${OP_NAME} PROPERTY CUDA_ARCHITECTURES OFF)
-# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -g")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
+# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -g")
 
 # Libraries
 target_compile_definitions(${OP_NAME} PUBLIC CUDA_EXECUTE)

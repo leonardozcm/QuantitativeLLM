@@ -327,6 +327,7 @@ void test_with_dtype(qttbench::State &state)
 
             dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M+BLOCK_SIZE-1)/ BLOCK_SIZE, ne2);
             dim3 block_size(BLOCK_SIZE/THREAD_SIZE, BLOCK_SIZE/THREAD_SIZE, 1);
+            // cudaFuncSetAttribute(sgemm_tiling_base<BLOCK_SIZE, BLOCK_SIZE, K_BLOCK_SIZE, THREAD_SIZE, THREAD_SIZE>, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
             sgemm_tiling_base<BLOCK_SIZE, BLOCK_SIZE, K_BLOCK_SIZE, THREAD_SIZE, THREAD_SIZE><<<grid_size, block_size, 0, s>>>(
                 A.data_ptr(), B.data_ptr(), C.data_ptr(), M, K, N);
         },
