@@ -398,6 +398,7 @@ void Tensor<T>::print(Args... args) const {
             std::cout<<std::endl;
         }
         std::cout<<"Tensor dim2 print done"<<std::endl;
+        free(data_cpu);
 
         // std::cerr << "GPU support needs to be implemented." << std::endl;
     }

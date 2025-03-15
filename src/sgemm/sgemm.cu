@@ -18,9 +18,9 @@ __global__ void verify_gpu(const float *C, const float *baseline, int *ret)
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     // printf("%f, %f\n", c[idx], a[idx]);
     // race but matters not
-    // printf("idx:[%d, %d] %f %f\n", idx/256, idx%256, C[idx], baseline[idx]);
     bool flag =         (fabs(baseline[idx]) > DATA_THRESHOLD || fabs(C[idx]) > DATA_THRESHOLD) &&
     (fabs(C[idx] - baseline[idx]) > ERR);
+    // printf("idx:[%d, %d] %f %f %s\n", idx / 128, idx % 128, C[idx], baseline[idx], flag?"false":"true");
     if ((*ret) &&
     // This is not a good sanity check method, but in this experiment this is good enough.
     // refactor it with reduce sum mean diff
@@ -263,9 +263,11 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
     // so for loading A_blk and B_blk they share the same pattern
     constexpr int warp_k_ld_in_float4_per_row = K_BLOCK / FLOAT4_NUMS; // 8/4=2
     // 2
-    const int thread_ld_offset_in_blk_y = M_BLOCK / warps_per_blk * warp_idx + warp_lane / warp_k_ld_in_float4_per_row; // 0~128
+    const int A_thread_ld_offset_in_blk_y = M_BLOCK / warps_per_blk * warp_idx + warp_lane / warp_k_ld_in_float4_per_row; // (0~15)*8+0~15, t0 and t1 are the same
+    const int B_thread_ld_offset_in_blk_x = M_BLOCK / warps_per_blk * warp_idx + warp_lane % (WARP_SIZE/2); // (0~15)*8+0~15, t0 and t16 are the same
     // 128*(0,1)+0~16
-    const int thread_ld_offset_in_blk_x = warp_lane % warp_k_ld_in_float4_per_row;  // 0 or 1
+    const int A_thread_ld_offset_in_blk_x = warp_lane % warp_k_ld_in_float4_per_row;  // 0 for 0,2,4,...30 and 1 for 1,3,5,...31
+    const int B_thread_ld_offset_in_blk_y = warp_lane / 16;  // 0 for 0,1,2,...15 and 1 for 16,17,18,..31
     // 0, 1
     constexpr int warp_ld_cover_y_in_blk = WARP_SIZE / warp_k_ld_in_float4_per_row; // 16
     // 16
@@ -273,8 +275,8 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
     // 8
 
     constexpr int slm_padding_dim = K_BLOCK;
-    __shared__ float A_blk_tile[slm_padding_dim][M_BLOCK]; // avoid bank conflict, for SM Occupancy is limited by thread
-    __shared__ float B_blk_tile[N_BLOCK][slm_padding_dim]; // avoid bank conflict, for SM Occupancy is limited by thread
+    __shared__ float A_blk_tile[slm_padding_dim][M_BLOCK];
+    __shared__ float B_blk_tile[slm_padding_dim][N_BLOCK+FLOAT4_NUMS]; // avoid bank conflict, for SM Occupancy is limited by thread， +4 for padding for saving x,y,z,w, 4 for float4 loading
 
     const float* A_blk_base_ptr = A+blk_y*M_BLOCK*K;
     const float* B_blk_base_ptr = B+blk_x*N_BLOCK*K;
@@ -293,8 +295,8 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
     // const int A_reg_ld_x_idx = tx%(warps_blk_A_size/M_THREAD)*M_THREAD;// 0, 8, 16, 24
     // const int B_reg_ld_y_idx = tx%(warps_blk_B_size/N_THREAD)*N_THREAD;// 0, 8, 16, 24...56 
-    A_blk_base_ptr += thread_ld_offset_in_blk_y*K;
-    B_blk_base_ptr += thread_ld_offset_in_blk_y*K;
+    A_blk_base_ptr += A_thread_ld_offset_in_blk_y*K;
+    B_blk_base_ptr += B_thread_ld_offset_in_blk_x*K;
 
     const int B_x_idx = blk_x*N_BLOCK+tx*N_THREAD;
     const int A_y_idx = blk_y*M_BLOCK+ty*M_THREAD;
@@ -306,29 +308,30 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
         // load A B block to slm
         {
             // load A blk in reg A
+            FECTH_FLOAT4(A_thread_reg) = FECTH_CONST_FLOAT4(A_blk_base_ptr+(A_thread_ld_offset_in_blk_x*FLOAT4_NUMS));
 
             // transpose and store to A slm blk
+            A_blk_tile[warp_idx][0*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->x;
+            A_blk_tile[warp_idx][1*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->y;
+            A_blk_tile[warp_idx][2*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->z;
+            A_blk_tile[warp_idx][3*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->w;
 
-            FECTH_FLOAT4(A_thread_reg) = FECTH_CONST_FLOAT4(A_blk_base_ptr+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));
-            A_blk_tile[warp_idx][0*WARP_SIZE+(warp_lane>>1)+thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->x;
-            A_blk_tile[warp_idx][1*WARP_SIZE+(warp_lane>>1)+thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->y;
-            A_blk_tile[warp_idx][2*WARP_SIZE+(warp_lane>>1)+thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->z;
-            A_blk_tile[warp_idx][3*WARP_SIZE+(warp_lane>>1)+thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->w;
-
-
-            // FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(B_blk_base_ptr+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));
-            // B_blk_tile[warp_idx][0*WARP_SIZE+thread_ld_offset_in_blk_x*16] = FECTH_FLOAT4(B_thread_reg)->x;
-            // B_blk_tile[warp_idx][1*WARP_SIZE+thread_ld_offset_in_blk_x*16] = FECTH_FLOAT4(B_thread_reg)->y;
-            // B_blk_tile[warp_idx][2*WARP_SIZE+thread_ld_offset_in_blk_x*16] = FECTH_FLOAT4(B_thread_reg)->z;
-            // B_blk_tile[warp_idx][3*WARP_SIZE+thread_ld_offset_in_blk_x*16] = FECTH_FLOAT4(B_thread_reg)->w;
+            // load B blk in reg B
+            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(B_blk_base_ptr+(B_thread_ld_offset_in_blk_y*FLOAT4_NUMS));
+            
+            // transpose and store to B slm blk
+            B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->x;
+            B_blk_tile[1+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->y;
+            B_blk_tile[2+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->z;
+            B_blk_tile[3+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->w;
 
             // // load A blk
             // FECTH_FLOAT4(&A_blk_tile[thread_ld_offset_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
             // FECTH_CONST_FLOAT4(A_blk_base_ptr+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));// <<2 for we already know it is a float4
             
-            // load B blk
-            FECTH_FLOAT4(&B_blk_tile[thread_ld_offset_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
-            FECTH_CONST_FLOAT4(B_blk_base_ptr+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));// <<2 for we already know it is a float4   
+            // // load B blk
+            // FECTH_FLOAT4(&B_blk_tile[thread_ld_offset_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
+            // FECTH_CONST_FLOAT4(B_blk_base_ptr+(thread_ld_offset_in_blk_x*FLOAT4_NUMS));// <<2 for we already know it is a float4   
         }
         __syncthreads();
 
@@ -341,15 +344,25 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
             // access slm in 128 bit to avoid bank conflict
             // A_thread_reg[i] = A_blk_tile[A_slm_warp_offset+i][k_i];
+
+            // load no bank conflict for threads in a warp:
+            // 0,2,4,...30 are accessing a same 4 float32(128 bit) in a row
+            // 1,3,5,...31 are accessing a same 4 float32(128 bit) in a row
+            // they all benifit from boardcast 
             FECTH_FLOAT4(A_thread_reg) = FECTH_CONST_FLOAT4(&A_blk_tile[warp_idx][k_i_slm_blk_idx*WARP_SIZE+k_i_slm_blk_offset*16+ty_reg_offset_A*8]);
             FECTH_FLOAT4(A_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&A_blk_tile[warp_idx][k_i_slm_blk_idx*WARP_SIZE+k_i_slm_blk_offset*16+ty_reg_offset_A*8+FLOAT4_NUMS]);
 
             
+            // // load slm to b_reg
+            // #pragma unroll
+            // for(int i=0; i<N_THREAD; i++){
+            //     B_thread_reg[i] = B_blk_tile[B_slm_warp_offset+i][k_i];
+            // }
+
             // load slm to b_reg
-            #pragma unroll
-            for(int i=0; i<N_THREAD; i++){
-                B_thread_reg[i] = B_blk_tile[B_slm_warp_offset+i][k_i];
-            }
+            // t0 and t16 access same 8*fp32, it will be broadcast and so on
+            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_slm_warp_offset]);
+            FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_slm_warp_offset+FLOAT4_NUMS]);
 
             // perform external product on A_reg x B_reg, store to C_reg
             #pragma unroll
@@ -537,7 +550,7 @@ int main(int argc, char *argv[])
     qttbench::State state(turns, perf, perf);
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
-    // test_with_dtype<qttbench::float32_t, 64, 64>(state);
+    // test_with_dtype<qttbench::float32_t, 128, 128, 128>(state);
     test_with_dtype<qttbench::float32_t, 4096, 4096, 4096>(state);
     // test_with_dtype<qttbench::float32_t, 2, 4096, 14336>(state);
     // test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
