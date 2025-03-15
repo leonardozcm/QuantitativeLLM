@@ -303,6 +303,20 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
     const int ty_reg_offset_A = ty &1;
 
+    const int tx_div_4 = tx >> 2;
+    const int tx_mod_4 = tx & 0x3;
+    const int tx_mod_8 = tx & 0x7;
+    const int tx_addr_round_4 = warp_idx*16+(tx_div_4<<2);
+    const int tx_mod_32 = tx_addr_round_4 & 0x1f;
+    const int tx_div_64_offset = (tx_addr_round_4 >> 6) << 6;
+    const int tx_mod_8_equals_4_offset = ((tx_addr_round_4 & 0x7) == 4)<<5;
+    const int tx_mod_32_offset = (tx_mod_32>>3)<<3;
+    const int tx_mod_64_div_32_offset = ((tx_addr_round_4 & 0x3f) >>5) <<2;
+
+    const int B_no_conflict_store_offset=tx_mod_32_offset+tx_div_64_offset+tx_mod_8_equals_4_offset+tx_mod_64_div_32_offset+tx_mod_4;
+    const int B_no_conflict_load_offset_first_half = ((tx >> 3) << 6) + (tx_mod_4<<3) + ((tx_mod_8>>2)<<2);
+    const int B_no_conflict_load_offset_second_half = B_no_conflict_load_offset_first_half+32;
+
     for(int k_cur=0; k_cur<K; k_cur+=K_BLOCK){
 
         // load A B block to slm
@@ -320,10 +334,10 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
             FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(B_blk_base_ptr+(B_thread_ld_offset_in_blk_y*FLOAT4_NUMS));
             
             // transpose and store to B slm blk
-            B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->x;
-            B_blk_tile[1+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->y;
-            B_blk_tile[2+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->z;
-            B_blk_tile[3+(B_thread_ld_offset_in_blk_y<<2)][(warp_lane & 0xf)+warp_idx*16] = reinterpret_cast<float4*>(B_thread_reg)->w;
+            B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->x;
+            B_blk_tile[1+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->y;
+            B_blk_tile[2+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->z;
+            B_blk_tile[3+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->w;
 
             // // load A blk
             // FECTH_FLOAT4(&A_blk_tile[thread_ld_offset_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
@@ -361,8 +375,8 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
             // load slm to b_reg
             // t0 and t16 access same 8*fp32, it will be broadcast and so on
-            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_slm_warp_offset]);
-            FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_slm_warp_offset+FLOAT4_NUMS]);
+            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_no_conflict_load_offset_first_half]);
+            FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_no_conflict_load_offset_second_half]);
 
             // perform external product on A_reg x B_reg, store to C_reg
             #pragma unroll
