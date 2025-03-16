@@ -329,10 +329,10 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
             FECTH_FLOAT4(A_thread_reg) = FECTH_CONST_FLOAT4(A_blk_base_ptr+(A_thread_ld_offset_in_blk_x*FLOAT4_NUMS));
 
             // transpose and store to A slm blk
-            A_blk_tile[warp_idx][0*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->x;
-            A_blk_tile[warp_idx][1*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->y;
-            A_blk_tile[warp_idx][2*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->z;
-            A_blk_tile[warp_idx][3*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->w;
+            A_blk_tile[warp_idx][0*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<const float4*>(A_thread_reg)->x;
+            A_blk_tile[warp_idx][1*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<const float4*>(A_thread_reg)->y;
+            A_blk_tile[warp_idx][2*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<const float4*>(A_thread_reg)->z;
+            A_blk_tile[warp_idx][3*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<const float4*>(A_thread_reg)->w;
 
             // load B blk in reg B
             FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(B_blk_base_ptr+(B_thread_ld_offset_in_blk_y*FLOAT4_NUMS));
@@ -340,10 +340,10 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
             // transpose and store to B slm blk
             // if(B_thread_ld_offset_in_blk_y==0){
 
-                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+0*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->x;
-                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+1*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->y;
-                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+2*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->z;
-                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+3*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->w;
+            B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+0*slm_ty_padding_dim_per_row] = reinterpret_cast<const float4*>(B_thread_reg)->x;
+            B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+1*slm_ty_padding_dim_per_row] = reinterpret_cast<const float4*>(B_thread_reg)->y;
+            B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+2*slm_ty_padding_dim_per_row] = reinterpret_cast<const float4*>(B_thread_reg)->z;
+            B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+3*slm_ty_padding_dim_per_row] = reinterpret_cast<const float4*>(B_thread_reg)->w;
             // }
 
             // B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->x;
@@ -420,10 +420,12 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
     #pragma unroll
     for(int i=0; i<M_THREAD; i++){
-        #pragma unroll
-        for(int j=0; j<N_THREAD; j++){
-            C[(A_y_idx+i)*N+B_x_idx+j] = C_thread_reg[i][j];
-        }
+        FECTH_FLOAT4(&C[(A_y_idx+i)*N+B_x_idx+0]) = FECTH_CONST_FLOAT4(&C_thread_reg[i][0]);
+        FECTH_FLOAT4(&C[(A_y_idx+i)*N+B_x_idx+FLOAT4_NUMS]) = FECTH_CONST_FLOAT4(&C_thread_reg[i][FLOAT4_NUMS]);
+        // #pragma unroll
+        // for(int j=0; j<N_THREAD; j++){
+        //     C[(A_y_idx+i)*N+B_x_idx+j] = C_thread_reg[i][j];
+        // }
     }
 
 }
