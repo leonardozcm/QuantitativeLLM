@@ -275,8 +275,10 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
     // 8
 
     constexpr int slm_padding_dim = K_BLOCK;
+    constexpr int slm_ty_padding_dim_per_row = N_BLOCK+FLOAT4_NUMS*2;
+    constexpr int slm_ty_padding_dim = slm_ty_padding_dim_per_row*4+WARP_SIZE/2;
     __shared__ float A_blk_tile[slm_padding_dim][M_BLOCK];
-    __shared__ float B_blk_tile[slm_padding_dim][N_BLOCK+FLOAT4_NUMS*2]; // avoid bank conflict, for SM Occupancy is limited by thread， +4 for padding for saving x,y,z,w, 4 for float4 loading
+    __shared__ float B_blk_tile[slm_padding_dim/4][slm_ty_padding_dim]; // avoid bank conflict, for SM Occupancy is limited by thread， +4 for padding for saving x,y,z,w, 4 for float4 loading
 
     const float* A_blk_base_ptr = A+blk_y*M_BLOCK*K;
     const float* B_blk_base_ptr = B+blk_x*N_BLOCK*K;
@@ -336,11 +338,18 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
             FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(B_blk_base_ptr+(B_thread_ld_offset_in_blk_y*FLOAT4_NUMS));
             
             // transpose and store to B slm blk
-            // TODO: here remains bank conflict in between t0 and t1
-            B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->x;
-            B_blk_tile[1+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->y;
-            B_blk_tile[2+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->z;
-            B_blk_tile[3+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->w;
+            // if(B_thread_ld_offset_in_blk_y==0){
+
+                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+0*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->x;
+                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+1*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->y;
+                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+2*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->z;
+                B_blk_tile[B_thread_ld_offset_in_blk_y][B_no_conflict_store_offset+3*slm_ty_padding_dim_per_row] = reinterpret_cast<float4*>(B_thread_reg)->w;
+            // }
+
+            // B_blk_tile[0+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->x;
+            // B_blk_tile[1+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->y;
+            // B_blk_tile[2+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->z;
+            // B_blk_tile[3+(B_thread_ld_offset_in_blk_y<<2)][B_no_conflict_store_offset] = reinterpret_cast<float4*>(B_thread_reg)->w;
 
             // // load A blk
             // FECTH_FLOAT4(&A_blk_tile[thread_ld_offset_in_blk_y][thread_ld_offset_in_blk_x*FLOAT4_NUMS])=
@@ -378,8 +387,9 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 
             // load slm to b_reg
             // t0 and t16 access same 8*fp32, it will be broadcast and so on
-            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_no_conflict_load_offset_first_half]);
-            FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][B_no_conflict_load_offset_second_half]);
+            const int k_i_mod_4 = k_i & 0x3;
+            FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i>>2][B_no_conflict_load_offset_first_half+k_i_mod_4*slm_ty_padding_dim_per_row]);
+            FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i>>2][B_no_conflict_load_offset_second_half+k_i_mod_4*slm_ty_padding_dim_per_row]);
 
             // #pragma unroll
             // for(int i=0; i<4; i++){
@@ -576,8 +586,8 @@ int main(int argc, char *argv[])
     qttbench::State state(turns, perf, perf);
     state.set_csv_output(strutils::get_filename_without_extension(__FILE__));
 
-    test_with_dtype<qttbench::float32_t, 128, 128, 128>(state);
-    // test_with_dtype<qttbench::float32_t, 4096, 4096, 4096>(state);
+    // test_with_dtype<qttbench::float32_t, 128, 128, 128>(state);
+    test_with_dtype<qttbench::float32_t, 4096, 4096, 4096>(state);
     // test_with_dtype<qttbench::float32_t, 2, 4096, 14336>(state);
     // test_with_dtype<qttbench::float32_t, 4096, 14336>(state);
     return 0;
