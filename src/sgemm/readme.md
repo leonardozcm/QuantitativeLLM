@@ -68,21 +68,23 @@
 \frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq I_{avg} \tag{1}
 ```
 
-最好情况下全命中L2 cache的计算强度: 
-$$
+最好情况下全命中L2 cache的计算强度:
+
+```math
 \frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq 25.77 \tag{2}
-$$
+```
 
 #### 物理线程的安排
 
 我们假设一个block的组成为block<<<tx, ty>>>, 根据映射关系有：
 
-$$
+```math
 M_{blk}=t_x*M_{thd}\tag{3}
-$$
-$$
+```
+
+```math
 N_{blk}=t_y*N_{thd}\tag{4}
-$$
+```
 
 这里简写了$M_{blk}=M_{block}$, $M_{thd}=M_{thread}$，后文将同样承袭这样的写法。
 
@@ -92,21 +94,21 @@ $$
 
 *register 占用*
 
-$$
+```math
 Num_{block}*\frac{regs_{thd}*t_x*t_y}{65536} \leq 1 \tag{5}
-$$
+```
 
 *smem 占用*
 
-$$
+```math
 Num_{block}*\frac{(M_{blk}+N_{blk})*K_{blk}*sizeof(fp32)}{32768} \leq 1 \tag{6}
-$$
+```
 
 *thread 占用*
 
-$$
+```math
 Num_{block}*\frac{t_x*t_y}{1024} \leq 1 \tag{7}
-$$
+```
 
 #### Break Time
 
@@ -131,9 +133,9 @@ $$
 
 每次迭代中，每个thread获取M_thread+N_thread个数据，向量外积的计算量为M_thread*N_thread，单次访存延时22 cycles，单次FFMA延时4 cycles。根据little's law，我们可以求出访存指令调度到拿到全部数据的延时为$2*(M_{thd}+N_{thd})+22$ cycles, 计算的指令调度到计算结束的延时为$2*M_{thd}*N_{thd}+4$，这里的乘2的原因是上面提到的一个warp的指令需要两个周期发射。我们需要做的事情是使：
 
-$$
+```math
 \frac{2*M_{thd}*N_{thd}+4}{2*(M_{thd}+N_{thd})+22} \geq 1 \tag{8}
-$$
+```
 
 当然这只是基本要求，左式的值越大越好。当然，这里我们忽略了李老师提到的访存带宽带来的比例系数Alpha的问题，但是这里我们的目的是使左式的最大，所以在有限范围内求出最大的取值方法就够了。
 
@@ -141,9 +143,9 @@ $$
 
 是的，我们还需要至少一个不等式才能开始我们的理论计算。我们在这里估算$regs_{thd}$的大致值，A_reg和B_reg各需要M_THREAD和N_THREAD个寄存器，矩阵外积需要M_THREAD*N_THREAD个寄存器，流程控制预留32个寄存器，那么有
 
-$$
+```math
 regs_{thd} = M_{thd}+N_{thd}+M_{thd}*N_{thd}+32 \tag{9}
-$$
+```
 
 以上应该是我们能用上的所有算式了，其实还漏了一个保证L2 cache hit rate的不等式，但是在我们这种大矩阵乘语境下其实L2的hit rate很好满足，不构成一个急迫的需求。另外一个没有提及的计算是一个warp内thread mapping的一点规则，感兴趣的朋友可以去看李老师的1.3节。
 
