@@ -95,7 +95,7 @@ N_{blk}=t_y*N_{thd}\tag{4}
 *register 占用*
 
 ```math
-Num_{block}*\frac{regs_{thd}*t_x*t_y}{65536} \leq 1 \tag{5}
+Num_{block}*\frac{regs_{thd}*t_x*t_y}{65536}\leq1 \tag{5}
 ```
 
 *smem 占用*
