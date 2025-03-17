@@ -1,10 +1,10 @@
 # SGEMM
 
-本文作为李少侠的这篇[[施工中] CUDA GEMM 理论性能分析与 kernel 优化](https://zhuanlan.zhihu.com/p/441146275)与Pzzzzz的这篇[传统 CUDA GEMM 不完全指北](https://zhuanlan.zhihu.com/p/584236348)，脉络上P老师这篇是对李老师的这篇文章的一些细节的补充和扩展，同时P老师也提出了自己的一些疑问。本文的书写目的是在两位老师的基础上进一步完善一些个人可能更在意的点，例如M_BLOCK,M_THREAD等如何从数学上近似求出取值范围，share memory中的内存排布设计原理以及如何结合NCU工具来辅助确定下一步优化的重点。一些前人阐述过的过程这里会指出引用位置。另外本文的书写顺序是按照我的实现顺序记录的，也算是从零开始实现的教程。
+本文作为李少侠的这篇[[施工中] CUDA GEMM 理论性能分析与 kernel 优化](https://zhuanlan.zhihu.com/p/441146275)与Pzzzzz的这篇[传统 CUDA GEMM 不完全指北](https://zhuanlan.zhihu.com/p/584236348)的补充，脉络上P老师这篇是对李老师的这篇文章的一些细节的补足和扩展，同时P老师也提出了自己的一些疑问。本文的书写目的是在两位老师的基础上进一步完善一些个人可能更在意的点，例如M_BLOCK,M_THREAD等如何从数学上近似求出取值范围，share memory中的内存排布设计原理以及如何结合NCU工具来辅助确定下一步优化的重点。一些前人阐述过的过程这里会指出引用位置。另外本文的书写顺序是按照我的实现顺序记录的，也算是从零开始实现的教程。
 
 # 项目目前进度
 
-本文测试矩阵乘规格为 A(M 4096 * K 4096) * B(K 4096 * N 4096) = C (M 4096 * N 4096),需要注意的是，我选用的A是row major的内存排步，即K是最低维，而B是column major，即K是最低维，C是row major。至于为什么这样选择，是因为后续计划写Q40的矩阵乘法，Q40的weights是column major，可以借鉴这个案例。
+本文测试矩阵乘规格为 A(M 4096 * K 4096) * B(K 4096 * N 4096) = C (M 4096 * N 4096),需要注意的是，我选用的A是row major的内存排布，即K是最低维，而B是column major，即K是最低维，C是row major。至于为什么这样选择，是因为后续计划写Q40的矩阵乘法，Q40的weights是column major，可以借鉴这个案例。
 目前推进到做好了从Global Memory到smem，smem到reg到tiling，规避了所有的bank conflict，还没做的是double buffer。
 
 <div style="text-align: center;">
@@ -26,9 +26,12 @@
 | Number of warpSize   | 32                   |
 | L2 Cache size:       | 4096 KB              |
 | smem latency         | 22 cycles            |
+| shared memory bandwidth per SM (measured)     | 111.734879 byte/cycle            |
+| shared memory bandwidth per SM (theoretical)   | 128 byte/cycle            |
 | L1 cache latency     | 32 cycles            |
 | L2 cache latency     | 214 cycles           |
 | DRAM latency         | 471 cycles           |
+| FMA latency          | 4 cycles           |
 | smem cache bandwidth | 9139.200195 GB/s     |
 | L2 cache bandwidth   | 1811.228600GB/s      |
 | DRAM bandwidth       | read 311.405838GB/s  |
@@ -112,3 +115,36 @@ $$
 #### smem级别的访存计算指令调度
 
 这一节李老师的文章的1.3节后半部已经阐述地很清晰了，基本的原理是warp向LSU发送访存请求本身需要一个周期，而拿到数据这件事本身也是有延时的，那么在这段访存的时间内我们是不是可以调度FMA来做一些计算的工作来充分利用warp scheduler发射指令，保证每个周期平均发射的指令数，让各个单元不要闲下来。题外话，这也是为什么Occupancy是一个重要的考量指标但是有时候不能完全盯着Occupancy看的原因，占用率高的潜台词是scheduler有更多的机会可以发射ready状态的warp指令来隐藏延时，如果有增加指令平均SM发射指令数的方法但是Occupancy会降低，那也是值得做的优化。
+
+那么从数学上来量化，我们要做的事情是让每个thread计算指令的发射周期数加上FMA的延时的总周期数和访存的指令发射周期数加上LSU延时的总周期数之比，尽可能地大。我的RTX2070s隶属于turing架构，这个架构里面每个SM有4个warp scheduler，每个scheduler只有一个Dispatch unit与16个full-throughput单元，因此应该一个warp(32 threads)的指令需要dispatch两次，即[两个cycles内发射完](https://docs.nvidia.com/cuda/turing-tuning-guide/index.html#instruction-scheduling)。
+
+> 向量内积 v.s. 向量外积
+>
+> 我们需要考量的另一个问题是，一次迭代中我们分别从A和B中拿到了M_thread和N_thread个数据，两个向量我们是应该选择向量内积还是向量外积求和呢？
+>
+> 其实这里P老师文章的Thread级别的优化这一章已经讲得很清楚了，这里强调一点两种方式访存模式的根本区别在于：
+> 
+> *每轮迭代中内积需要对相同的B tile重复多读M次，而外积用寄存器空间换取了时间，一次迭代相同的B tile只需要读1次。*
+>
+> 在满带宽的情况下，一个SM有16*4=64个FMA单元，故一个周期内可完成64个FMA指令（考虑一个周期的时间切片）。smem的出口理论带宽128 B/cycle，实际只有111.7 B/cycle左右。从一个warp的角度考虑（因为warp是最小执行单位），一个周期可以产生32次FFMA指令，每次需要2个float长度的数据，也就是8字节，故总共需要256B的smem的访存量，这么多数据的访存需要 256B /128(B/cycle)=2 cycles来从smem的出口出去。而64个FMA指令需要的数据量需要512B，需要4个cycles来读取，那么这个过程的计算访存比为1/4。这是我们不愿意看到的，因为理想情况下应该是计算可以覆盖访存，现在大部分的时间FMA都在饥饿。
+
+
+每次迭代中，每个thread获取M_thread+N_thread个数据，向量外积的计算量为M_thread*N_thread，单次访存延时22 cycles，单次FFMA延时4 cycles。根据little's law，我们可以求出访存指令调度到拿到全部数据的延时为$2*(M_{thd}+N_{thd})+22$ cycles, 计算的指令调度到计算结束的延时为$2*M_{thd}*N_{thd}+4$，这里的乘2的原因是上面提到的一个warp的指令需要两个周期发射。我们需要做的事情是使：
+
+$$
+\frac{2*M_{thd}*N_{thd}+4}{2*(M_{thd}+N_{thd})+22}>=1 \tag{8}
+$$
+
+当然这只是基本要求，左式的值越大越好。当然，这里我们忽略了李老师提到的访存带宽带来的比例系数Alpha的问题，但是这里我们的目的是使左式的最大，所以在有限范围内求出最大的取值方法就够了。
+
+#### 估算$regs_{thd}$
+
+是的，我们还需要至少一个不等式才能开始我们的理论计算。我们在这里估算$regs_{thd}$的大致值，A_reg和B_reg各需要M_THREAD和N_THREAD个寄存器，矩阵外积需要M_THREAD*N_THREAD个寄存器，流程控制预留32个寄存器，那么有
+
+$$
+regs_{thd} = M_{thd}+N_{thd}+M_{thd}*N_{thd}+32 \tag{9}
+$$
+
+以上应该是我们能用上的所有算式了，其实还漏了一个保证L2 cache hit rate的不等式，但是在我们这种大矩阵乘语境下其实L2的hit rate很好满足，不构成一个急迫的需求。另外一个没有提及的计算是一个warp内thread mapping的一点规则，感兴趣的朋友可以去看李老师的1.3节。
+
+### 实际计算
