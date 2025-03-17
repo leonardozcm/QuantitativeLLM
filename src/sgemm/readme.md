@@ -59,13 +59,15 @@
 
 #### GLOBAL MEMORY的计算访存比
 
-我们以一个BLOCK为单位来研究一个BLOCK内的计算访存比，首先一个block每次迭代的计算量为$M_{BLOCK}*K_{BLOCK}*N_{BLOCK}*2$，访存量为$(M_{BLOCK}+N_{BLOCK})*K_{BLOCK}*sizeof(fp32)$，那么其计算访存比为$\frac{M_{BLOCK}*N_{BLOCK}}{(M_{BLOCK}+N_{BLOCK})*sizeof(fp32)}=\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})}$。GEMM作为典型的计算boundary的算子，我们期待它的行为是计算时间和访存时间基本覆盖，为了供应计算的需求可以充分利用各级带宽。首先我们保守一点，对于global memory的带宽311.405 GB/s，假设计算单元和带宽跑满时计算强度$I=\frac{7.838 TFLOPS}{311.405 GB/s}=25.77$，也即是计算访存比大于25.77时就有希望可以跑满带宽，这还是在不考虑L2 cache的存在的情况下，每次load都会miss cache的结果。如果我们考虑L2 cache的情况，M，K，N足够大到可以忽略第一次load进L2 cache时候的cache miss，同时L2 cache无限大，我们可以求出对L2的计算强度bar为$I=\frac{7.838 TFLOPS}{1811.22 GB/s}=4.43$。当然，假设L2 cache足够大和MKN足够大的情况很难成立，这里的计算得出的公式是为了每个BLOCK的计算访存比兜底，并尽可能地最大化计算访存比。额外的，我们再假定L2 cache的命中率为$L2_{hitrate}$时，L2和DRAM的等效带宽为$BW_{avg}=311.405*(1-L2_{hitrate})+1811.22*L2_{hitrate} GB/s$最大化利用带宽的计算强度为$I_{avg}=\frac{7.838 TFLOPS}{BW_{avg}}$
+我们以一个BLOCK为单位来研究一个BLOCK内的计算访存比，首先一个block每次迭代的计算量为 $ M_{BLOCK}*K_{BLOCK}*N_{BLOCK}*2 $ ，访存量为 $(M_{BLOCK}+N_{BLOCK})*K_{BLOCK}*sizeof(fp32)$ ，那么其计算访存比为 $\frac{M_{BLOCK}*N_{BLOCK}}{(M_{BLOCK}+N_{BLOCK})*sizeof(fp32)}=\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})}$ 。GEMM作为典型的计算boundary的算子，我们期待它的行为是计算时间和访存时间基本覆盖，为了供应计算的需求可以充分利用各级带宽。首先我们保守一点，对于global memory的带宽311.405 GB/s，假设计算单元和带宽跑满时计算强度 $I=\frac{7.838 TFLOPS}{311.405 GB/s}=25.77$ ，也即是计算访存比大于25.77时就有希望可以跑满带宽，这还是在不考虑L2 cache的存在的情况下，每次load都会miss cache的结果。如果我们考虑L2 cache的情况，M，K，N足够大到可以忽略第一次load进L2 cache时候的cache miss，同时L2 cache无限大，我们可以求出对L2的计算强度bar为 $I=\frac{7.838 TFLOPS}{1811.22 GB/s}=4.43$ 。当然，假设L2 cache足够大和MKN足够大的情况很难成立，这里的计算得出的公式是为了每个BLOCK的计算访存比兜底，并尽可能地最大化计算访存比。额外的，我们再假定L2 cache的命中率为$L2_{hitrate}$时，L2和DRAM的等效带宽为 $BW_{avg}=311.405*(1-L2_{hitrate})+1811.22*L2_{hitrate} GB/s$ 最大化利用带宽的计算强度为 $I_{avg}=\frac{7.838 TFLOPS}{BW_{avg}}$
 
 综上，所以有:
 
 最低要求的计算强度: 
 ```math
+
 \frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq I_{avg} \tag{1}
+
 ```
 
 最好情况下全命中L2 cache的计算强度:
@@ -86,11 +88,11 @@ M_{blk}=t_x*M_{thd}\tag{3}
 N_{blk}=t_y*N_{thd}\tag{4}
 ```
 
-这里简写了$M_{blk}=M_{block}$, $M_{thd}=M_{thread}$，后文将同样承袭这样的写法。
+这里简写了 $M_{blk}=M_{block}$ , $M_{thd}=M_{thread}$ ，后文将同样承袭这样的写法。
 
 #### 寄存器，SMEM和thread的占用率
 
-这里是基本的求占用率问题，我们再定义每个block可以最多同时运行的block数量为$Num_{block}$, 每个thread占用的寄存器为$regs_{thd}$:
+这里是基本的求占用率问题，我们再定义每个block可以最多同时运行的block数量为 $Num_{block}$ , 每个thread占用的寄存器为 $regs_{thd}$ :
 
 *register 占用*
 
@@ -131,7 +133,7 @@ Num_{block}*\frac{t_x*t_y}{1024} \leq 1 \tag{7}
 > 在满带宽的情况下，一个SM有16*4=64个FMA单元，故一个周期内可完成64个FMA指令（考虑一个周期的时间切片）。smem的出口理论带宽128 B/cycle，实际只有111.7 B/cycle左右。从一个warp的角度考虑（因为warp是最小执行单位），一个周期可以产生32次FFMA指令，每次需要2个float长度的数据，也就是8字节，故总共需要256B的smem的访存量，这么多数据的访存需要 256B /128(B/cycle)=2 cycles来从smem的出口出去。而64个FMA指令需要的数据量需要512B，需要4个cycles来读取，那么这个过程的计算访存比为1/4。这是我们不愿意看到的，因为理想情况下应该是计算可以覆盖访存，现在大部分的时间FMA都在饥饿。
 
 
-每次迭代中，每个thread获取M_thread+N_thread个数据，向量外积的计算量为M_thread*N_thread，单次访存延时22 cycles，单次FFMA延时4 cycles。根据little's law，我们可以求出访存指令调度到拿到全部数据的延时为$2*(M_{thd}+N_{thd})+22$ cycles, 计算的指令调度到计算结束的延时为$2*M_{thd}*N_{thd}+4$，这里的乘2的原因是上面提到的一个warp的指令需要两个周期发射。我们需要做的事情是使：
+每次迭代中，每个thread获取M_thread+N_thread个数据，向量外积的计算量为M_thread*N_thread，单次访存延时22 cycles，单次FFMA延时4 cycles。根据little's law，我们可以求出访存指令调度到拿到全部数据的延时为$2*(M_{thd}+N_{thd})+22$ cycles, 计算的指令调度到计算结束的延时为 $2*M_{thd}*N_{thd}+4$ ，这里的乘2的原因是上面提到的一个warp的指令需要两个周期发射。我们需要做的事情是使：
 
 ```math
 \frac{2*M_{thd}*N_{thd}+4}{2*(M_{thd}+N_{thd})+22} \geq 1 \tag{8}
@@ -141,7 +143,7 @@ Num_{block}*\frac{t_x*t_y}{1024} \leq 1 \tag{7}
 
 #### 估算$regs_{thd}$
 
-是的，我们还需要至少一个不等式才能开始我们的理论计算。我们在这里估算$regs_{thd}$的大致值，A_reg和B_reg各需要M_THREAD和N_THREAD个寄存器，矩阵外积需要M_THREAD*N_THREAD个寄存器，流程控制预留32个寄存器，那么有
+是的，我们还需要至少一个不等式才能开始我们的理论计算。我们在这里估算 $regs_{thd}$ 的大致值，A_reg和B_reg各需要M_THREAD和N_THREAD个寄存器，矩阵外积需要M_THREAD*N_THREAD个寄存器，流程控制预留32个寄存器，那么有
 
 ```math
 regs_{thd} = M_{thd}+N_{thd}+M_{thd}*N_{thd}+32 \tag{9}
