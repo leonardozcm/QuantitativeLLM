@@ -68,9 +68,9 @@
 \frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq I_{avg} \tag{1}
 ```
 
-$$
 最好情况下全命中L2 cache的计算强度: 
-\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})}>=25.77 \tag{2}
+$$
+\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq 25.77 \tag{2}
 $$
 
 #### 物理线程的安排
@@ -93,19 +93,19 @@ $$
 *register 占用*
 
 $$
-Num_{block}*\frac{regs_{thd}*t_x*t_y}{65536} <= 1 \tag{5}
+Num_{block}*\frac{regs_{thd}*t_x*t_y}{65536} \leq 1 \tag{5}
 $$
 
 *smem 占用*
 
 $$
-Num_{block}*\frac{(M_{blk}+N_{blk})*K_{blk}*sizeof(fp32)}{32768} <= 1 \tag{6}
+Num_{block}*\frac{(M_{blk}+N_{blk})*K_{blk}*sizeof(fp32)}{32768} \leq 1 \tag{6}
 $$
 
 *thread 占用*
 
 $$
-Num_{block}*\frac{t_x*t_y}{1024} <= 1 \tag{7}
+Num_{block}*\frac{t_x*t_y}{1024} \leq 1 \tag{7}
 $$
 
 #### Break Time
@@ -132,7 +132,7 @@ $$
 每次迭代中，每个thread获取M_thread+N_thread个数据，向量外积的计算量为M_thread*N_thread，单次访存延时22 cycles，单次FFMA延时4 cycles。根据little's law，我们可以求出访存指令调度到拿到全部数据的延时为$2*(M_{thd}+N_{thd})+22$ cycles, 计算的指令调度到计算结束的延时为$2*M_{thd}*N_{thd}+4$，这里的乘2的原因是上面提到的一个warp的指令需要两个周期发射。我们需要做的事情是使：
 
 $$
-\frac{2*M_{thd}*N_{thd}+4}{2*(M_{thd}+N_{thd})+22}>=1 \tag{8}
+\frac{2*M_{thd}*N_{thd}+4}{2*(M_{thd}+N_{thd})+22} \geq 1 \tag{8}
 $$
 
 当然这只是基本要求，左式的值越大越好。当然，这里我们忽略了李老师提到的访存带宽带来的比例系数Alpha的问题，但是这里我们的目的是使左式的最大，所以在有限范围内求出最大的取值方法就够了。
