@@ -65,7 +65,7 @@
 
 最低要求的计算强度: 
 ```math
-\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} >= I_{avg} \tag{1}
+\frac{1}{4*(\frac{1}{M_{BLOCK}}+\frac{1}{N_{BLOCK}})} \geq I_{avg} \tag{1}
 ```
 
 $$
