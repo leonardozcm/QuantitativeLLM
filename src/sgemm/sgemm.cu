@@ -432,7 +432,7 @@ __global__ void sgemm_tiling_optimize(const float *A, const float *B, float *C, 
 }
 
 // +2%
-template <int M_BLOCK=128, int N_BLOCK=128, int K_BLOCK=8, int M_THREAD=8, int N_THREAD=8>
+template <int M_BLOCK=128, int N_BLOCK=128, int K_BLOCK=8, int M_THREAD=8, int N_THREAD=8, bool CROSS_LOAD_B=true>
 __global__ void sgemm_tiling_warp_optimize(const float *A, const float *B, float *C, const size_t M, const size_t K, const size_t N)
 {
     const int tx=threadIdx.x;
@@ -566,17 +566,17 @@ __global__ void sgemm_tiling_warp_optimize(const float *A, const float *B, float
             // 14,15,30,31 are accessing a same 8*fp32 in a column
             const int k_i_mod_4 = k_i & 0x3;
             // t0 t8 bank conflict, let first quarter and second quarter access different float4
-            // {
-            //     FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8]);
-            //     FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS]);
-            //     // FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS]);
-            // }
-
-            // cross load version, t0 and t8 access different parts of 8*fp32 by float4 step
-            // notice how we use warp_quarter_idx_mod_2
+            if(CROSS_LOAD_B)
             {
                 FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS*warp_quarter_idx_mod_2) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS*warp_quarter_idx_mod_2]);
                 FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS*(warp_quarter_idx_mod_2^1)) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS*(warp_quarter_idx_mod_2^1)]);
+                // FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS]);
+            }else
+            // cross load version, t0 and t8 access different parts of 8*fp32 by float4 step
+            // notice how we use warp_quarter_idx_mod_2
+            {
+                FECTH_FLOAT4(B_thread_reg) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8]);
+                FECTH_FLOAT4(B_thread_reg+FLOAT4_NUMS) = FECTH_CONST_FLOAT4(&B_blk_tile[k_i][warp_idx_mod_2*64+lane_mod_16_div2*8+FLOAT4_NUMS]);
             }
  
 
@@ -715,6 +715,26 @@ void test_with_dtype(qttbench::State &state)
 
         state.run(
         "sgemm_tiling optimize warp 128 128 8 8 8",
+        [&](cudaStream_t s)
+        {
+            const size_t K = hidden_status_A;
+            const size_t N = hidden_status_B;
+            const size_t M = seq_len;
+            const size_t ne2 = bs;
+            constexpr int BLOCK_SIZE = 128;
+            constexpr int THREAD_SIZE = 8;
+            constexpr int K_BLOCK_SIZE = 8;
+
+            dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M+BLOCK_SIZE-1)/ BLOCK_SIZE, ne2);
+            dim3 block_size(BLOCK_SIZE/THREAD_SIZE, BLOCK_SIZE/THREAD_SIZE, 1);
+            // cudaFuncSetAttribute(sgemm_tiling_base<BLOCK_SIZE, BLOCK_SIZE, K_BLOCK_SIZE, THREAD_SIZE, THREAD_SIZE>, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+            sgemm_tiling_warp_optimize<BLOCK_SIZE, BLOCK_SIZE, K_BLOCK_SIZE, THREAD_SIZE, THREAD_SIZE, false><<<grid_size, block_size, 0, s>>>(
+                A.data_ptr(), B.data_ptr(), C.data_ptr(), M, K, N);
+        },
+        VERIFY_FUNC);
+
+        state.run(
+        "sgemm_tiling optimize warp cross load B 128 128 8 8 8",
         [&](cudaStream_t s)
         {
             const size_t K = hidden_status_A;

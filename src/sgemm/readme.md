@@ -317,3 +317,21 @@ OK，我们经历了一段不算轻松的旅程，好在我们通过合理假设
 ## smem内存排布
 
 我们选取备选项（1）来实现初版的SGEMM，一个block由256个thread组成，即8个warp。考虑加载A和B的tile到smem的过程，我们发现从warp的角度加载DRAM到smem的映射关系还没有确定，但我们知道每个tile我们要加载128*8=1024个fp32，也即每个thread要加载4个fp32。同时P老师的Warp Tiling一节解释了warp_x和warp_y取8 * 4或者4 * 8时一个warp内的计算访存比最大，所以我们的warp的mapping如下：
+![alt text](../../images/image-5.png)
+
+整张图对应一个block负责的C_tile(128*128)，也就是说每个warp负责 32 * 64大小的一块区域。个人认为这样排和竖着排理论上应该没有区别，因为我们关注的过程有三个：A_tile、B_tile加载到smem，A_reg、B_reg从smem加载到寄存器，以及最后的向量外积。三个阶段的实现相互独立，在Tiling Size确定的情况下，在warps之间排布顺序这个粒度并没有什么影响计算需要注意的地方。所以接下来我们还剩三个排布问题急需解决：1. A_tile在smem里面的排布 2.B_tile在smem里面的排布 3.在warp内部32个thread的排布情况。我们也明确一下我们的最理想情况下的目的：合并访存是大前提，同时尽可能地解决Bank Conflict，几个thread同时访问同一个数据的情况下整个warp可以触发广播机制。
+
+### A_tile的排布问题
+
+很容易想到的是，我们在M和N的维度上做向量外积，往前推一步，一次迭代中，从smem到register获取的每个值都会被其他warp或者warp中的其他线程重复访问多次，再往前推一步，从DRAM加载到smem每个值只需要访问一次，那么我们是不是应该至少保证从smem加载到register这一步就合并访存（float4访问），从而减少MIO throttle的压力。为了合并访存，我们需要对A_tile在smem存成转置后的形态，即我们定义A_tile在smem里面的样子是[K_Block, M_Block]。
+![alt text](../../images/image-6.png)
+
+OK, 大致确定了A_tile和A_reg的存取问题，按照顺序我们就可以来看看我们怎么在向smem存A_tile的时候完成转置这一操作。
+
+我们先看怎么安排256个线程8个warp加载一个128 * 8大小的矩阵。我们很自然地可以首先想到两个方案：
+
+![alt text](../../images/image-7.png)
+
+两个方案的区别在于一个warp负责的区域，方案A是16 * 8，方案B时32 * 4，两者的访存量是一致的。在这里我们说A更好，因为L2 cache读取细粒度是32 bytes，所以内存对齐的访问最好是32 bytes的倍数的，B方案每个warp的thread最多同时访问一行里面的4个fp32，也即16B，无法保证每次L2访存都是32B对齐的，这样就会造成访问量一半的浪费。
+
+再看一个warp内部的排布情况。
