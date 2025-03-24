@@ -69,6 +69,18 @@ namespace qttbench{
             }
         }
 
+        std::pair<time_t, const char*> get_proper_time_present(time_t during){
+            if(during>1e9){
+                return std::make_pair(during/1e9, "s");
+            }else if(during>1e6){
+                return std::make_pair(during/1e6, "ms");
+            }else if(during>1e3){
+                return std::make_pair(during/1e3, "us");
+            }else{
+                return std::make_pair(during, "ns");
+            }
+        }
+
         public:
             // move only
             State(const State&)=delete;
@@ -131,8 +143,9 @@ namespace qttbench{
                     #endif
                 }
                 
-                time_t during = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-                QTTBENCH_LOG(strutils::string_format("Benchmark %s warms up within %d nanoseconds", exec_name.c_str(), during));
+                time_t during_t = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                auto [during, units_t] = get_proper_time_present(during_t);
+                QTTBENCH_LOG(strutils::string_format("Benchmark %s warms up within %d %s.", exec_name.c_str(), during, units_t));
             }
             
             template<typename ExecuteType, typename VerifyType>
@@ -165,8 +178,9 @@ namespace qttbench{
                     #endif
                 }
 
-                time_t during = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-                QTTBENCH_LOG(strutils::string_format("Benchmark %s takes %d nanoseconds with %d times run, %d nanoseconds per run.\n", exec_name.c_str(), during, trials, (time_t)(during/trials)));
+                time_t during_t = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                auto [during, units_t] = get_proper_time_present(during_t);
+                QTTBENCH_LOG(strutils::string_format("Benchmark %s takes %d %s with %d times run, %d  %s per run.\n", exec_name.c_str(), during, units_t, trials, (time_t)(during/trials), units_t));
                 estiminated_tasks.emplace_back(exec_name.c_str());
                 estiminated_duration.emplace_back(during/trials);
             }
