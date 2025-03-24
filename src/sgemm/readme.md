@@ -334,4 +334,130 @@ OK, 大致确定了A_tile和A_reg的存取问题，按照顺序我们就可以�
 
 两个方案的区别在于一个warp负责的区域，方案A是16 * 8，方案B时32 * 4，两者的访存量是一致的。在这里我们说A更好，因为L2 cache读取细粒度是32 bytes，所以内存对齐的访问最好是32 bytes的倍数的，B方案每个warp的thread最多同时访问一行里面的4个fp32，也即16B，无法保证每次L2访存都是32B对齐的，这样就会造成访问量一半的浪费。
 
-再看一个warp内部的排布情况。
+再看一个warp内部的排布情况。我们已经明确了每个thread访问一个float4，类似warp的排布方式我们有两种常见的排布：
+
+![alt text](../../images/image-8.png)
+
+因为对DRAM的访问是以warp为一个整体思考的，同时因为存进smem时要一个元素一个元素地转置，我们会以一个float的粒度（STS.32）来转置，也是以一个warp为整体来思考，那么A和B的方式就没有什么区别了。这里我们选用了方案A。以下是我们用float4转置代码的示意：
+
+```cpp
+// transpose and store to A slm blk
+A_blk_tile[warp_idx][0*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->x;
+A_blk_tile[warp_idx][1*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->y;
+A_blk_tile[warp_idx][2*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->z;
+A_blk_tile[warp_idx][3*WARP_SIZE+(warp_lane>>1)+A_thread_ld_offset_in_blk_x*16] = reinterpret_cast<float4*>(A_thread_reg)->w;
+
+```
+
+在存smem的时候我们发现一个问题，那就是t0和t1，t2和t3等等两两之间会发生严重的bank conflict如下：
+
+![alt text](../../images/image-9.png)
+
+这里有两种解决办法，一种是将128扩大到128+4，这样到奇数线程store到第4行的时候，t0和t1对应的bank刚好相差4*4=16，刚好和偶数线程store的bank错位开。
+
+![alt text](../../images/image-11.png)
+
+虽然这样会造成轻微的浪费，对于gemm这个场景来说smem是限制occupancy的主要因素，所以这点浪费不会影响性能。
+
+另外一种方式是，将奇数线程的16个fp32存到偶数线程16个fp32的后面：
+
+![alt text](../../images/image-12.png)
+
+那么M在[16，31]范围内的值就被存到了第二行，这样做的好处是可以节约smem，缺点是取值时索引变换会变得很麻烦。本文采取了第二种方式。
+
+### A_reg的load问题
+
+从warp的排布我们可以算出，每个warp的32个线程要从A_tile读32个fp32，一个A_reg的大小为8个fp32，这32个fp32便分成4组，每组8个fp32。那么一个A_reg要由32/4=8个thread去读，我们需要确定一种映射关系使32个线程平均映射到4个组里面。为了使访问同一个组的线程可以最快拿到数据，我们希望组内的8个线程可以尽可能依赖广播机制在一个wavefront内拿到这组数据。
+
+这里我们回忆一下float4(128bit)访存的wavefront机制：
+
+对于128bit的访存一个warp最少也需要两个wave front，我们考虑合并访存也是以half warp作为单位来计算(参考[CUDA Shared Memory 在向量化指令下的访存机制](https://code.hitori.moe/post/cuda-shared-memory-access-mechanism-with-vectorized-instructions/#128-%E4%BD%8D%E5%AE%BD%E7%9A%84%E8%AE%BF%E5%AD%98%E6%8C%87%E4%BB%A4))：
+
+> 对于 64 位宽的访存指令而言，除非触发广播机制，否则一个 Warp 中有多少个活跃的 Half-Warp 就需要多少个 Memory Transaction，一个 Half-Warp 活跃的定义是这个 Half-Warp 内有任意一个线程活跃。触发广播机制只需满足以下条件中的至少一个：
+> 
+> 对于 Warp 内所有活跃的第 i 号线程，第 i xor 1 号线程不活跃或者访存地址和其一致；
+> 
+> 对于 Warp 内所有活跃的第 i 号线程，第 i xor 2 号线程不活跃或者访存地址和其一致；
+> 
+> 如果触发了广播机制，那么两个 Half-Warp 内的 Memory Transaction 可以合并成一个。
+
+> 128 位宽的访存指令和 64 位宽的访存指令是类似的，不同的是需要以 Half-Warp 为单位来计算，对于每个 Half-Warp 而言，除非触发广播机制，这个 Half-Warp 中有多少个活跃的 Quarter-Warp 就需要多少个 Memory Transaction，一个 Quarter-Warp 活跃的定义是这个 Quarter-Warp 内有任意一个线程活跃。类似地，如果触发广播机制那么两个 Quarter-Warp 中的 Transaction 就可以被合并成一个。 触发广播机制的条件和 64 位宽的访存指令是一样的（注意广播机制是以整个 Warp 为单位考虑）。这也就意味着假设一个 Warp 中 32 个线程都活跃，即使它们的访存地址都一样，也需要 2 个 Memory Transaction。
+
+令addr(t_i)为线程t_i访问的float4的第一个元素的地址，则为了触发广播机制，以t0为例，我们希望有
+
+```math
+addr(t_0)=add(t_1) / addr(t_0)=add(t_2)
+```
+
+一个half warp(t0~t15)需访问16个fp32，即两组，在上一节的方案中这16个float32刚好是连续的。于是我们有三种方案：
+
+![alt text](../../images/image-15.png)
+
+在这些方案中，每一个Quarter Warp都触发了广播机制的第一条或第二条或者同时两条，一个halfwarp的访存触发广播机制，一个warp的访问只需要最少的2个wavefront（推荐结合上面链接的文章理解推导一下）。
+
+但是有一点是可以确定的，那就是一个half warp(t0~t15)内的线程最好访问连续的16个fp32。原因是我们在load A_tile时交叉排布导致的，元素16～31和0～16处于不同行的同一个bank内，假设第一个half warp里面有一个quarter的线程访问了16~31，除非我们人为地干预使两个quarter交叉访问（也没有必要人为增加工作的复杂度），否则很容易发生bank conflict。所以无论是哪一种方式，half warp的thread一定是在组0和组1之内或者组2和组3之间:
+
+![alt text](../../images/image-16.png)
+
+这个结论很重要，在确定B_reg的排布问题时我们会利用这个结论排除一些不成立的选项。
+
+
+### B_tile的排布问题和B_reg的load问题
+
+看起来我们对B_tile做的事情和A_tile类似，也是需要转置一下，但是和A不同的是B_reg的分组映射关系和其是不同的，这会影响到转置策略的可用性。我们先考虑使用和A_tile同样的方案，将奇数线程的16个fp32存到偶数线程16个fp32的后面。
+
+从warp的排布我们可以算出，每个warp的32个线程要从B_tile读64个fp32，一个B_reg的大小为8个fp32，这64个fp32便分成8组，每组8个fp32。那么一个B_reg要由32/8=4个thread去读，我们需要确定一种映射关系使32个线程平均映射到8个组里面。为了使访问同一个组的线程可以最快拿到数据，我们希望组内的4个线程可以尽可能依赖广播机制在一个wavefront内拿到这组数据，整个warp用最少的两个wavefront就可以拿到数据。
+
+我们排出这八组在bank里面的相对位置
+
+![alt text](../../images/image-17.png)
+
+我们再看一下上一节的这张图：
+
+![alt text](../../images/image-16.png)
+
+从这两张图我们可以推理出来，t0~t15的这halfwarp必须覆盖到第一章图里面所有的reg才可以使整个计算成立。也就是说，halfwarp里面每两个thread对应一个reg这样读。在不做padding的情况下这可能在没有bank conflict的情况下实现吗？答案是不可能的。
+
+![alt text](../../images/image-18.png)
+
+我们把问题具象化一下，我们有16个球，为了触发广播机制，16个球两两绑定，相当于只有8组球，现在我的问题是我要把这8组球放入这16个格子，要求在每个竖向的格子只有一组球（避免bank conflict）。由抽屉原理，这是不可能的。
+
+所以我们只能选择方案一，即B_tile必须通过padding来规避store以及load时候的Bank Conflict。
+
+那么store to smem就不是一个问题了，现在我们再来讨论B_reg的load问题。
+
+![alt text](../../images/image-19.png)
+
+考虑一个half warp，我们可以平铺直叙地这样去映射我们的线程：
+
+![alt text](../../images/image-21.png)
+
+这样也有问题，因为这样t0,t1和t8,t9会发生Bank Conflict，可以尝试交换组内的线程排布，但是这样总是有Bank Conflict存在。NCU也显示我们仍然存在Bank Conflict：
+
+![alt text](../../images/image-22.png)
+
+解决办法也很简单，我们让t0,t1和t8,t9错位去加载，t0,t1加载前4个bank的数据，t8,t9加载后4个bank的数据：
+
+![alt text](../../images/image-23.png)
+
+第二次load的时候再交换回来就好，如此一来half warp内相邻线程触发广播机制，两个quarter warp之间没有Bank Conflict，我们理论上可以在2个wavefront就去发送一个warp的访存指令。
+
+![alt text](../../images/image-25.png)
+
+确实没有Bank Conflict，wavefront也减少了三分之一。
+
+最后我们来看看我们warp内32个线程的排布是什么样的：
+
+![alt text](../../images/image-26.png)
+
+没错，这就是李老师的Z字排布广播速度快的由来，A和B都可以只用两个wavefront完成一个warp的register load。
+
+## Double Buffer
+
+做到这里我发现离cublass的实现还有一段距离，通过NCU的source code analysis，我发现有约15%的时间是在等待DRAM的数据到寄存器，这段时间计算单元完全没有利用起来。
+
+![alt text](../../images/image-27.png)
+
+我们想到，可以在上一次迭代进行计算前发出这一轮迭代的数据的请求命令，这样上一轮的计算时间就可以掩盖这一轮访存的时间。另外我发现，cublass的矩阵乘和我采用了同样的block size和grid size，却用了几乎两倍于我实现的smem，所以我有理由怀疑Double buffer就是最后一块拼图。
+
+![alt text](../../images/image-28.png)
